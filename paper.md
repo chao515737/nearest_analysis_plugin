@@ -10,7 +10,7 @@ authors:
   - name: Chao Gong
     affiliation: "1"
 affiliations:
-  - name: "Department of Civil, Structural and Environmental Engineering, Trinity College Dublin"
+  - name: "Geography Department, Maynooth University"
     index: 1
 date: 2025-10-28
 bibliography: paper.bib
