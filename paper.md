@@ -1,16 +1,16 @@
 ---
-title: 'Nearest Analysis: A QGIS plugin for nearest-feature analysis with WFS and ArcGIS REST'
+title: "Nearest Analysis: A QGIS Plugin for Automated Nearest-Feature Spatial Analysis"
 tags:
   - QGIS
-  - GIS
   - Python
-  - Geospatial
-  - Environmental data
+  - GIS
+  - Spatial Analysis
+  - Geoscience
 authors:
   - name: Chao Gong
-    affiliation: 1
+    affiliation: "1"
 affiliations:
-  - name: Geography Department, Maynooth University
+  - name: "Department of Civil, Structural and Environmental Engineering, Trinity College Dublin"
     index: 1
 date: 2025-10-28
 bibliography: paper.bib
@@ -18,53 +18,72 @@ bibliography: paper.bib
 
 # Summary
 
-`Nearest Analysis` is a QGIS plugin that automates nearest-feature analysis between a local “Application Area” (vector layer) and remote datasets served via EPA WFS and ArcGIS REST services. The plugin normalizes all computations to EPSG:29903 (Irish Grid), pre-downloads features within a configurable buffer from the application boundary (default 2 km), computes the nearest distance and geographic azimuth (0° = North, clockwise), and exports a CSV of the single nearest feature. A Matplotlib view is provided for quick visual inspection (centroid, nearest points, and an arrow).
+**Nearest Analysis** is an open-source QGIS plugin developed to automate the process of nearest-feature spatial analysis between a local "Application Area" and remote geospatial data sources such as the EPA WFS or ArcGIS REST Feature Service. The tool standardizes coordinate systems, downloads relevant data within a user-defined buffer, and computes both the nearest distance and geographic azimuth (0° = North, clockwise). It then exports the result to a CSV file and optionally displays a Matplotlib figure showing the relationship between the application area and its nearest feature.
+
+This plugin simplifies and automates tasks that are traditionally labor-intensive in QGIS, allowing environmental engineers, planners, and GIS professionals to perform reproducible proximity analyses directly from public web-based datasets.
 
 # Statement of need
 
-Spatial analysts and environmental researchers frequently need to quantify distances and directions from a project boundary to relevant environmental features (e.g., waterbodies, geoheritage sites, greenways). Conventional workflows often involve manual data retrieval, projection harmonization, and spatial querying, which are time-consuming and error-prone. This plugin streamlines those steps within QGIS: it queries authoritative EPA WFS / ArcGIS endpoints directly, enforces a consistent projected CRS (EPSG:29903), and produces minimal, reproducible outputs (CSV + plot). The result is faster iteration, reduced manual handling, and improved reproducibility for site-screening and reporting.
+Assessing the proximity between project sites and environmental features is a key step in geospatial analysis, environmental impact assessments, and land-use planning. Traditionally, such analyses require manual data downloads, CRS transformations, and distance computations, which can be error-prone and time-consuming.  
+
+The *Nearest Analysis* plugin addresses this gap by offering an intuitive interface that directly connects QGIS to public geospatial APIs (e.g., EPA WFS, ArcGIS Feature Services). It enables automated, transparent, and reproducible nearest-feature computations without requiring users to write code or perform complex GIS preprocessing.
 
 # Functionality
 
-- **Remote data sources:** EPA WFS (via `owslib`) and ArcGIS Feature/Map Services (via REST).
-- **CRS normalization:** all layers are reprojected to **EPSG:29903 (Irish Grid)** for metric distance.
-- **Configurable search extent:** pre-download features within a buffer from the application boundary.
-- **Nearest metrics:** computes **nearest distance** and **geographic azimuth** (0° = North, clockwise) and a cardinal direction.
-- **Outputs:** exports a **single nearest feature** to CSV (selected attributes + distance/azimuth/direction); optional Matplotlib visualization.
+The plugin was developed using **Python** and **PyQt5** within the QGIS Plugin Builder environment. It leverages the following open-source libraries:
 
-# Implementation
+- **QGIS API** (`qgis.core`, `QgsProject`) for accessing layers loaded in QGIS.
+- **GeoPandas** and **Shapely** for spatial data operations and geometry calculations.
+- **OWSLib** and **Requests** for connecting to remote WFS and ArcGIS REST endpoints.
+- **Matplotlib** for visualizing results as interactive figures.
 
-The plugin is implemented in Python using QGIS (PyQt5, `qgis.core`) with `geopandas`/`shapely` for geometry handling, `owslib` and `requests` for WFS/REST access, and Matplotlib for visualization.  
-Key design choices:
-- **Pre-download and filter** remote features by the buffered application boundary to reduce unnecessary processing.
-- **Robust CRS handling**: if a source layer lacks a CRS, EPSG:4326 is assumed, then reprojected to EPSG:29903.
-- **Minimal output**: one-row CSV with the nearest feature for clear downstream use in reports.
+Key functionalities include:
 
-# Installation and usage
+- Support for both local and online vector data (e.g., EPA WFS, ArcGIS REST Feature Services).
+- Automatic re-projection of all layers to **EPSG:29903 (Irish National Grid)**.
+- Pre-download of features within a user-specified buffer (default 2 km).
+- Computation of the nearest distance, azimuth angle (°), and direction (N, NE, E, SE, S, SW, W, NW).
+- CSV export containing the nearest feature and its distance and direction.
+- Optional visualization of results using Matplotlib, including centroids, connecting arrows, and buffer areas.
 
-1. Install QGIS (v3.x).  
-2. Place the plugin folder in your QGIS user plugins directory (or install from source via the QGIS Plugin Manager’s “Install from ZIP”).  
-3. In QGIS, load your local **Application Area** layer.  
-4. In the plugin dialog, choose one API layer (EPA WFS or ArcGIS REST), optionally select fields, and set the **buffer distance** (default 2 km).  
-5. Run analysis → select an output folder → a CSV is generated; a Matplotlib figure can be displayed.
+# Implementation details
 
-**Dependencies:** `geopandas`, `shapely`, `requests`, `owslib`, `matplotlib` (plus QGIS’s PyQt5 and `qgis.core`).  
-**CRS:** all computations use EPSG:29903 (Irish Grid).
+All spatial operations are handled using GeoPandas and Shapely.  
+The workflow is as follows:
 
-# Quality control
+1. The plugin reads the selected local layer (“Application Area”) and converts it to EPSG:29903.
+2. It downloads features from the selected remote API (EPA WFS or ArcGIS REST).
+3. Only features within the buffer distance (default 100 km, user-adjustable) are retained.
+4. The nearest feature is computed for each application area polygon.
+5. The nearest distance, azimuth, and direction are written to a CSV file.
+6. A Matplotlib window is generated to visualize the results.
 
-- The plugin includes logging for each step (CRS normalization, field loading, pre-download counts, CSV export).  
-- Typical checks include: (i) CRS correctness, (ii) buffer-filter sanity (features count within extent), and (iii) visual inspection in the Matplotlib view and QGIS canvas.  
-- We recommend validating results on a small test area and comparing measured distances (in meters) against known ground truth or QGIS’s native tools.
+The plugin’s design follows reproducibility and transparency principles, including provenance disclosure of AI-assisted code generation (OpenAI GPT-family), with all final logic verified and rewritten by the author.
 
-# Availability
+# Example usage
 
-- **Repository:** (add your public Git URL here)  
-- **License:** OSI-approved license (e.g., MIT).  
-- **Issue tracking:** enabled on the repository for bugs and feature requests.
+After installation in QGIS, users can:
+1. Open the *Nearest Analysis* plugin from the QGIS Plugin menu.
+2. Select a local vector layer (e.g., shapefile) as the “Application Area.”
+3. Choose a remote API layer (e.g., EPA WFS dataset).
+4. Optionally adjust the buffer distance or output fields.
+5. Run the analysis to generate:
+   - A CSV file containing the nearest feature and its distance/direction.
+   - A Matplotlib map illustrating the spatial relationship.
+
+# Impact and applications
+
+The plugin enables:
+- Faster, reproducible proximity analysis for environmental assessment and infrastructure planning.
+- Direct integration with public datasets (e.g., Irish EPA geoserver) without manual downloads.
+- Consistent coordinate systems and units for accurate geospatial computation.
+- Immediate visual and tabular outputs for professional reporting.
 
 # Acknowledgements
 
-We thank collaborators and colleagues for feedback on requirements and testing. Early prototyping benefited from assistance by GPT-based tools; the final implementation was refactored and validated by the author.
+This work was developed at Trinity College Dublin, with valuable discussions and feedback from Rory Brickenden.  
+Initial prototypes were assisted by a large language model (OpenAI GPT family), and all final code has been refactored, documented, and validated by the author.
 
 # References
+
+See `paper.bib` for citations of referenced software and libraries.
