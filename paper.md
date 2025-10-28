@@ -66,7 +66,7 @@ After installation in QGIS, users can:
 1. Open the *Nearest Analysis* plugin from the QGIS Plugin menu.
 2. Select a local vector layer (e.g., shapefile) as the “Application Area.”
 3. Choose a remote API layer (e.g., EPA WFS dataset).
-4. Optionally adjust the buffer distance or output fields.
+4. Optionally adjust the output fields.
 5. Run the analysis to generate:
    - A CSV file containing the nearest feature and its distance/direction.
    - A Matplotlib map illustrating the spatial relationship.
