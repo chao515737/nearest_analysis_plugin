@@ -28,7 +28,7 @@ Spatial analysts and environmental researchers frequently need to quantify dista
 
 - **Remote data sources:** EPA WFS (via `owslib`) and ArcGIS Feature/Map Services (via REST).
 - **CRS normalization:** all layers are reprojected to **EPSG:29903 (Irish Grid)** for metric distance.
-- **Configurable search extent:** pre-download features within a buffer from the application boundary (default **2 km**, previously 100 km).
+- **Configurable search extent:** pre-download features within a buffer from the application boundary.
 - **Nearest metrics:** computes **nearest distance** and **geographic azimuth** (0° = North, clockwise) and a cardinal direction.
 - **Outputs:** exports a **single nearest feature** to CSV (selected attributes + distance/azimuth/direction); optional Matplotlib visualization.
 
