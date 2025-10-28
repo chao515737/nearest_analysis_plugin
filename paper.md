@@ -81,7 +81,7 @@ The plugin enables:
 
 # Acknowledgements
 
-This work was developed at Trinity College Dublin, with valuable discussions and feedback from Rory Brickenden.  
+This work was developed at Quarry Consulting, with valuable discussions and feedback from Rory Brickenden.  
 Initial prototypes were assisted by a large language model (OpenAI GPT family), and all final code has been refactored, documented, and validated by the author.
 
 # References
