@@ -41,7 +41,7 @@ Key functionalities include:
 
 - Support for both local and online vector data (e.g., EPA WFS, ArcGIS REST Feature Services).
 - Automatic re-projection of all layers to **EPSG:29903 (Irish National Grid)**.
-- Pre-download of features within a user-specified buffer (default 2 km).
+- Pre-download of features within a user-specified buffer.
 - Computation of the nearest distance, azimuth angle (°), and direction (N, NE, E, SE, S, SW, W, NW).
 - CSV export containing the nearest feature and its distance and direction.
 - Optional visualization of results using Matplotlib, including centroids, connecting arrows, and buffer areas.
