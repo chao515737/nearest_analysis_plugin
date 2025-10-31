@@ -53,7 +53,7 @@ The workflow is as follows:
 
 1. The plugin reads the selected local layer (“Application Area”) and converts it to EPSG:29903.
 2. It downloads features from the selected remote API (EPA WFS or ArcGIS REST).
-3. Only features within the buffer distance (default 100 km, user-adjustable) are retained.
+3. Only features within the buffer distance (default 100 km) are retained.
 4. The nearest feature is computed for each application area polygon.
 5. The nearest distance, azimuth, and direction are written to a CSV file.
 6. A Matplotlib window is generated to visualize the results.
