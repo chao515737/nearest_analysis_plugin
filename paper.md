@@ -26,7 +26,7 @@ This plugin simplifies and automates tasks that are traditionally labor-intensiv
 
 This plugin supports spatial analysis and reproducible geospatial workflows, similar in spirit to other geospatial research approaches (Cahalane et al., 2019; Credit, 2019), but focused on automating proximity computation for environmental assessment tasks. Assessing the proximity between project sites and environmental features is a key step in geospatial analysis, environmental impact assessments, and land-use planning. Traditionally, such analyses require manual data downloads, CRS transformations, and distance computations, which can be error-prone and time-consuming.  
 
-The *Nearest Analysis* plugin addresses this gap by offering an intuitive interface that directly connects QGIS to public geospatial APIs (e.g., EPA WFS, ArcGIS Feature Services). It enables automated, transparent, and reproducible nearest-feature computations without requiring users to write code or perform complex GIS preprocessing.
+The *Nearest Analysis* plugin addresses this gap by offering an intuitive interface that directly connects QGIS to public geospatial APIs (e.g., EPA WFS, ArcGIS Feature Services). It enables automated, transparent, and reproducible nearest-feature computations without requiring users to write code or perform complex GIS preprocessing.This plugin builds upon established approaches in geospatial automation and QGIS plugin development (Cuckovic, 2016; Conrad et al., 2015).
 
 # Functionality
 
