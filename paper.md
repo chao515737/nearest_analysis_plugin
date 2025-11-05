@@ -18,7 +18,7 @@ bibliography: paper.bib
 
 # Summary
 
-**Nearest Analysis** is an open-source QGIS plugin developed to automate the process of nearest-feature spatial analysis between a local "Application Area" and remote geospatial data sources such as the EPA WFS or ArcGIS REST Feature Service. The tool standardizes coordinate systems, downloads relevant data within a user-defined buffer, and computes both the nearest distance and geographic azimuth (0° = North, clockwise). It then exports the result to a CSV file and optionally displays a Matplotlib figure showing the relationship between the application area and its nearest feature.
+**Nearest Analysis** is an open-source QGIS plugin developed to automate the process of nearest-feature spatial analysis between a local "Application Area" and remote geospatial data sources such as the EPA WFS or ArcGIS REST Feature Service. The tool standardizes coordinate systems, downloads relevant data within a user-defined buffer, and computes both the nearest distance and geographic azimuth (0° = North, clockwise). It then exports the result to a CSV file and optionally displays a Matplotlib figure showing the relationship between the application area and its nearest feature. The plugin has been applied to real-world environmental assessment tasks in Ireland, where it successfully identified nearest site and hydrographic features from EPA datasets within 100 km of proposed development areas.
 
 This plugin simplifies and automates tasks that are traditionally labor-intensive in QGIS, allowing environmental engineers, planners, and GIS professionals to perform reproducible proximity analyses directly from public web-based datasets.
 
