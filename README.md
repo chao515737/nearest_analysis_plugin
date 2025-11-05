@@ -10,6 +10,13 @@ and exports the nearest feature to CSV.
 - QGIS with PyQt5
 - geopandas, shapely, requests, owslib, matplotlib
 
+## Installation
+1. Download this repository as ZIP.  
+2. Unzip it into your local QGIS plugin directory:
+   - **Windows:** `C:\Users\<username>\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\`
+3. Restart QGIS and enable the *Nearest Analysis* plugin.
+4. In QGIS, open the menu: Plugins → Manage and Install Plugins → Nearest_Analysis.
+   
 ## Usage
 1. Load your shapefile (application area) into QGIS.
 2. Choose an API layer (EPA or ArcGIS).
