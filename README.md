@@ -1,3 +1,4 @@
+[![status](https://joss.theoj.org/papers/81027dee0d64d9d2e2cb4ce3f12abb24/status.svg)](https://joss.theoj.org/papers/81027dee0d64d9d2e2cb4ce3f12abb24)
 # nearest_analysis_plugin# Nearest Analysis QGIS Plugin
 
 This QGIS plugin performs nearest-feature analysis between a local "Application Area"
