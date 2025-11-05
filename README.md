@@ -14,8 +14,8 @@ and exports the nearest feature to CSV.
 1. Download this repository as ZIP.  
 2. Unzip it into your local QGIS plugin directory:
    - **Windows:** `C:\Users\<username>\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\`
-3. Restart QGIS and enable the *Nearest Analysis* plugin.
-4. In QGIS, open the menu: Plugins → Manage and Install Plugins → Nearest_Analysis.
+3. Restart QGIS, open the menu: Plugins → Manage and Install Plugins → Nearest_Analysis.
+4. Enable the *Nearest Analysis* plugin.
    
 ## Usage
 1. Load your shapefile (application area) into QGIS.
