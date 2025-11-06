@@ -1,9 +1,7 @@
 [![status](https://joss.theoj.org/papers/81027dee0d64d9d2e2cb4ce3f12abb24/status.svg)](https://joss.theoj.org/papers/81027dee0d64d9d2e2cb4ce3f12abb24)
 # nearest_analysis_plugin# Nearest Analysis QGIS Plugin
 
-This QGIS plugin performs nearest-feature analysis between a local "Application Area"
-and remote datasets (EPA WFS or ArcGIS Feature Service).  
-It calculates the nearest distance and geographic azimuth (0° = North, clockwise)
+This plugin was developed to support environmental site assessments and regulatory mapping in Ireland, enabling reproducible geospatial workflows that automate proximity analysis between local project areas and national datasets (e.g., EPA WFS). This QGIS plugin performs nearest-feature analysis between a local "Application Area" and remote datasets (EPA WFS or ArcGIS Feature Service). It calculates the nearest distance and geographic azimuth (0° = North, clockwise)
 and exports the nearest feature to CSV.
 
 ## Requirements
