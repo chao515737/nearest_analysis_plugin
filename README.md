@@ -7,7 +7,7 @@ and exports the nearest feature to CSV.
 ## Overview
 The Nearest Analysis Plugin is not a single-function tool.
 It integrates multiple geospatial processing components — including API-based data retrieval, coordinate transformation, proximity and azimuth computation, and automatic visualization and CSV export — into a single reproducible workflow for environmental site assessment.
-The plugin was developed and tested over several months as part of an environmental protection project in Ireland.
+The plugin was developed and tested over 5 months as part of an environmental protection project in Ireland.
 It aims to provide a reusable and extensible framework for researchers and practitioners working with QGIS and national geospatial datasets (e.g., EPA WFS, ArcGIS REST services).
 This modular design allows users to adapt the plugin for other datasets or research areas, ensuring transparency and reproducibility in geospatial analysis.
 
