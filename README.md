@@ -4,6 +4,13 @@
 This plugin was developed to support environmental site assessments and regulatory mapping in Ireland, enabling reproducible geospatial workflows that automate proximity analysis between local project areas and national datasets (e.g., EPA WFS). This QGIS plugin performs nearest-feature analysis between a local "Application Area" and remote datasets (EPA WFS or ArcGIS Feature Service). It calculates the nearest distance and geographic azimuth (0° = North, clockwise)
 and exports the nearest feature to CSV.
 
+## Overview
+The Nearest Analysis Plugin is not a single-function tool.
+It integrates multiple geospatial processing components — including API-based data retrieval, coordinate transformation, proximity and azimuth computation, and automatic visualization and CSV export — into a single reproducible workflow for environmental site assessment.
+The plugin was developed and tested over several months as part of an environmental protection project in Ireland.
+It aims to provide a reusable and extensible framework for researchers and practitioners working with QGIS and national geospatial datasets (e.g., EPA WFS, ArcGIS REST services).
+This modular design allows users to adapt the plugin for other datasets or research areas, ensuring transparency and reproducibility in geospatial analysis.
+
 ## Requirements
 - QGIS with PyQt5
 - geopandas, shapely, requests, owslib, matplotlib
