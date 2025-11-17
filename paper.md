@@ -28,6 +28,19 @@ This plugin supports spatial analysis and reproducible geospatial workflows, sim
 
 The *Nearest Analysis* plugin addresses this gap by offering an intuitive interface that directly connects QGIS to public geospatial APIs (e.g., EPA WFS, ArcGIS Feature Services). It enables automated, transparent, and reproducible nearest-feature computations without requiring users to write code or perform complex GIS preprocessing.This plugin builds upon established approaches in geospatial automation and QGIS plugin development (Cuckovic, 2016; Conrad et al., 2015).
 
+# Scholarly Contribution
+
+Environmental assessment workflows in Ireland and internationally require reproducible proximity analysis between project sites and regulatory environmental features. Existing QGIS tools provide nearest-neighbor analysis only for local datasets and do not support automated CRS standardization, multi-source API integration, azimuth computation, or reproducible remote-data filtering.
+
+The Nearest Analysis plugin contributes a scholarly advancement by formalizing a repeatable, API-driven, multi-stage geospatial workflow that:
+unifies heterogeneous data sources (EPA WFS and ArcGIS REST);
+reprojects all inputs to a common geodetic reference frame (EPSG:29903);
+computes geographic azimuth following surveying conventions (0° = north, clockwise);
+implements spatial pre-filtering to reduce environmental dataset noise and computational load;
+and provides transparent, reproducible outputs suitable for scientific and regulatory reporting.
+
+This fills an existing methodological gap in environmental GIS practice, where nearest-feature computations are typically performed manually, without standardization, and without reproducibility. The plugin therefore provides a computational framework that can be directly reused in environmental impact assessment, planning constraints analysis, hydrographic receptor identification, and other geospatial research domains.
+
 # Functionality
 
 The plugin was developed using **Python** and **PyQt5** within the QGIS Plugin Builder environment. It leverages the following open-source libraries:
