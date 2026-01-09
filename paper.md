@@ -95,7 +95,7 @@ The plugin enables:
 # Acknowledgements
 
 This work was developed at Maynooth University, with valuable guidance from Dr Conor and Dr Kevin.  
-Initial prototypes were assisted by a large language model (OpenAI GPT family), and all final code has been refactored, documented, and validated by the author.
+All final code has been refactored, documented, and validated by the author.
 
 # References
 
