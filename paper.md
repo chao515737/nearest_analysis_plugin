@@ -71,7 +71,7 @@ The workflow is as follows:
 5. The nearest distance, azimuth, and direction are written to a CSV file.
 6. A Matplotlib window is generated to visualize the results.
 
-The plugin’s design follows reproducibility and transparency principles, including provenance disclosure of AI-assisted code generation (OpenAI GPT-family), with all final logic verified and rewritten by the author.
+The plugin’s design follows reproducibility and transparency principles, with all implementation decisions verified and maintained by the author.
 
 # Example usage
 
