@@ -47,3 +47,10 @@ and nearest features (red) with connecting arrows:
 
 ## License
 This project is licensed under the MIT License – see [LICENSE](./LICENSE) for details.
+
+## Citation
+
+If you use this software in your research, please cite:
+
+chao515737. (2026). *Nearest Analysis QGIS Plugin*. Zenodo.  
+https://doi.org/10.5281/zenodo.18262401
