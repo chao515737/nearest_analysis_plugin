@@ -56,4 +56,7 @@ The software is intended for reuse in environmental assessment, planning analysi
 
 ## Acknowledgements
 
-The author acknowledges the Geography Department at Maynooth University for institutional support, and thanks colleagues for feedback during development and testing. All final code has been reviewed, documented, and validated by the author.
+The author gratefully acknowledges the Geography Department at Maynooth University for institutional support. 
+Special thanks are extended to Dr Conor and Dr Kevin for their academic guidance, constructive feedback, 
+and valuable discussions during the development and testing of this software. 
+All final code has been reviewed, documented, and validated by the author.
