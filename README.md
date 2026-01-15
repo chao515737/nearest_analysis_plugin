@@ -1,4 +1,4 @@
-# nearest_analysis_plugin# Nearest Analysis QGIS Plugin
+# Nearest Analysis QGIS Plugin
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18262401.svg)](https://doi.org/10.5281/zenodo.18262401)
 
