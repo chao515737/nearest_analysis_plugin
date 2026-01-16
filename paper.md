@@ -42,7 +42,7 @@ The plugin supports both WFS-based and ArcGIS REST-based services and includes f
 
 ## Example Use Case
 
-A typical use case involves screening a proposed development site against environmental datasets published by national agencies. After loading the application area into QGIS, a user selects an EPA WFS dataset (e.g., hydrographic or protected site layers) and runs the analysis. The plugin automatically retrieves nearby features, computes the nearest distance and direction, and produces a CSV suitable for inclusion in environmental assessment reports, along with an optional visualization for interpretive support.
+A typical use case involves screening a proposed development site against environmental datasets published by national agencies. After loading the application area into QGIS, a user selects an EPA WFS dataset (e.g., hydrographic or protected site layers) and runs the analysis. The plugin automatically retrieves nearby features, computes the nearest distance and direction, and produces a CSV suitable for inclusion in environmental assessment reports, along with an optional visualization for interpretive support. Beyond illustrative examples, the software has been applied in real-world environmental assessment and geospatial consultancy workflows in Ireland, supporting reproducible proximity screening using authoritative regulatory datasets.
 
 ## Availability and Reuse
 
