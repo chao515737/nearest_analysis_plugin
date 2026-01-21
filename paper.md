@@ -1,22 +1,19 @@
 ---
-
 title: "Nearest Analysis: A QGIS Plugin for Automated Nearest-Feature Spatial Analysis"
 tags:
-
-* QGIS
-* GIS
-* Spatial Analysis
-* Geoscience
-* Python
-  authors:
-* name: Chao Gong
-  affiliation: 1
-  affiliations:
-* name: Geography Department, Maynooth University
-  index: 1
-  date: 2026-01-15
-  bibliography: paper.bib
-
+  - QGIS
+  - GIS
+  - Spatial Analysis
+  - Geoscience
+  - Python
+authors:
+  - name: Chao Gong
+    affiliation: 1
+affiliations:
+  - name: Geography Department, Maynooth University
+    index: 1
+date: 2026-01-15
+bibliography: paper.bib
 ---
 
 ## Abstract
