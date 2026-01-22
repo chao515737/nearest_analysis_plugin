@@ -19,7 +19,7 @@ This modular design allows users to adapt the plugin for other datasets or resea
 ## Installation
 1. Download the repository from GitHub as a ZIP file, which will be automatically named nearest_analysis_plugin-main.zip.
 2. Unzip it — inside the extracted folder nearest_analysis_plugin-main, you will find another folder named nearest_analysis_plugin.
-3. Copy that inner folder (not the outer one) to your QGIS plugin directory:
+3. Copy that inner folder (not the outer one) to your QGIS plugin directory and rename it to `nearest_analysis`:
    - **Windows:** `C:\Users\<username>\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\`
 4. Restart QGIS, open the menu: Plugins → Manage and Install Plugins → Nearest_Analysis.
 5. Enable the *Nearest Analysis* plugin.
