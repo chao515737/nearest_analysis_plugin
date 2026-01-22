@@ -71,7 +71,7 @@ The software has been tested in QGIS 3.x environments (tested with QGIS 3.28 and
 
 ## Operating system
 
-Windows, macOS, and Linux (via QGIS 3.x)
+Windows(via QGIS 3.x)
 
 ## Programming language
 
