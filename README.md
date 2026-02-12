@@ -29,6 +29,31 @@ This modular design allows users to adapt the plugin for other datasets or resea
 2. Choose an API layer (EPA or ArcGIS).
 3. Run the analysis to generate a CSV and plot.
 
+## Minimal Reproducible Example
+
+To ensure reproducibility without dependency on live API services, 
+this repository includes a minimal example dataset located in:
+
+example_data/
+
+Contents:
+
+- input_polygons.gpkg  
+  Sample application area used for testing.
+
+- api_snapshot.geojson  
+  Static snapshot of the EPA WFD River Waterbodies dataset 
+  clipped to a small study area.
+
+### Reproducing the Workflow
+
+1. Load `input_polygons.gpkg` into QGIS.
+2. Load `api_snapshot.geojson`.
+3. Run the Nearest Analysis plugin.
+4. Export the resulting CSV.
+
+This allows the workflow to be reproduced without network access.
+
 ## Example Output
 
 After running the plugin in QGIS, the analysis generates both a map and a CSV file.  
