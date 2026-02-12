@@ -1,47 +1,39 @@
 # This file contains metadata for your plugin.
-
-# This file should be included when you package your plugin.# Mandatory items:
+# This file should be included when you package your plugin.
 
 [general]
 name=Nearest_Analysis
 qgisMinimumVersion=3.0
-description=Perform analysis on the nearest features
-version=0.1
+description=Perform nearest feature analysis with distance and bearing calculation
+version=1.0.1
+
 author=Chao Gong
 email=gongch2024@gmail.com
 
-about=Perform analysis on the nearest features.
+about=Nearest_Analysis is a QGIS plugin for automated nearest feature analysis, including distance and bearing calculation with CSV export. Source code: https://github.com/chao515737/nearest_analysis_plugin. Archived version (DOI): https://doi.org/10.5281/zenodo.18262402. ORCID: https://orcid.org/0009-0009-5363-1854
 
-tracker=https://www.linkedin.com/in/chao-gong-455ba8332/
-repository=https://www.linkedin.com/in/chao-gong-455ba8332/
+tracker=https://github.com/chao515737/nearest_analysis_plugin/issues
+repository=https://github.com/chao515737/nearest_analysis_plugin
+
 # End of mandatory metadata
 
 # Recommended items:
-
 hasProcessingProvider=no
-# Uncomment the following line and add your changelog:
-# changelog=
 
-# Tags are comma separated with spaces allowed
-tags=python
+tags=python, qgis, gis, spatial-analysis, nearest-neighbour
 
-homepage=http://www.quarryconsulting.ie/
+homepage=https://github.com/chao515737/nearest_analysis_plugin
 category=Plugins
 icon=icon.png
-# experimental flag
-experimental=True
 
-# deprecated flag (applies to the whole plugin, not just a single version)
+# experimental flag
+experimental=False
+
+# deprecated flag
 deprecated=False
 
-# Since QGIS 3.8, a comma separated list of plugins to be installed
-# (or upgraded) can be specified.
-# Check the documentation for more information.
 # plugin_dependencies=
 
-Category of the plugin: Raster, Vector, Database or Web
-# category=
+# category=Vector
 
-# If the plugin can run on QGIS Server.
 server=False
-
