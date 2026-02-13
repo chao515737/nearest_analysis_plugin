@@ -117,7 +117,7 @@ Nearest Analysis can be reused in environmental assessment, planning analysis, a
 
 ## Acknowledgements
 
-The author gratefully acknowledges the Geography Department at Maynooth University for institutional support. Special thanks are extended to Dr Conor Cahalane and Dr Kevin Credit for academic guidance and constructive feedback during the development of this software.
+The author gratefully acknowledges the Geography Department at Maynooth University for institutional support. 
 
 ## Funding statement
 
