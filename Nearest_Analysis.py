@@ -33,6 +33,7 @@ Notes
 """
 
 from PyQt5 import QtWidgets, uic
+from PyQt5.QtCore import Qt
 from qgis.core import QgsProject, QgsVectorLayer
 import geopandas as gpd
 import os
@@ -66,7 +67,15 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
         # State
         self.wfs_layers_info = {}
+        # Cache pre-filtered API GeoDataFrames.
+        # Keyed by (api_display_name, app_layer_data_source_uri)
         self.api_pre_filtered = {}
+        # Caches to avoid repeated network calls when switching selections
+        self.wfs_fields_cache = {}      # key: type_name -> [field names]
+        self.arcgis_fields_cache = {}   # key: json_url -> [field names]
+
+        # Reuse a single HTTP session for better performance (keep-alive, connection pooling)
+        self.http = requests.Session()
 
         self.populate_layers()
 
@@ -125,7 +134,10 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         self.shp_layers = []
         self.api_layers = []
         self.wfs_layers_info.clear()
-        self.api_pre_filtered.clear()
+        # NOTE: do not clear self.api_pre_filtered here.
+        # The dialog may call populate_layers multiple times; clearing the cache would force
+        # re-downloading large API layers again. Cache keys include the app layer URI so it
+        # stays safe across layer selection changes.
 
         # Collect vector layers from the current QGIS project
         for layer in QgsProject.instance().mapLayers().values():
@@ -165,8 +177,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         # Re-bind signals (avoid duplicates)
         for sig, slot in [
             (self.combo_api.currentIndexChanged, self.update_fields_for_api),
-            (self.combo_api.currentIndexChanged, self.run_prestep),
-            (self.combo_app.currentIndexChanged, self.run_prestep),
         ]:
             try:
                 sig.disconnect(slot)
@@ -190,6 +200,12 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         # Case 1: WFS via DescribeFeatureType
         type_name = self.wfs_layers_info.get(api_name)
         if type_name:
+            # Use cached field list when available
+            if type_name in self.wfs_fields_cache:
+                for f in self.wfs_fields_cache[type_name]:
+                    self.fields_list.addItem(f)
+                self.log(f"Loaded {len(self.wfs_fields_cache[type_name])} WFS fields (cached).")
+                return
             try:
                 wfs_url = "https://gis.epa.ie/geoserver/EPA/wfs"
                 params = {
@@ -198,7 +214,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                     "request": "DescribeFeatureType",
                     "typename": type_name
                 }
-                r = requests.get(wfs_url, params=params, timeout=10)
+                r = self.http.get(wfs_url, params=params, timeout=10)
                 r.raise_for_status()
                 root = ET.fromstring(r.content)
 
@@ -215,6 +231,8 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
                 for f in fields:
                     self.fields_list.addItem(f)
+                # Cache to avoid repeating DescribeFeatureType
+                self.wfs_fields_cache[type_name] = fields
                 self.log(f"Loaded {len(fields)} WFS fields.")
             except Exception as e:
                 self.log(f"Failed to load WFS fields: {e}")
@@ -240,11 +258,20 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 json_url = base_url.split("/query")[0]
                 json_url = json_url.rstrip("/query") + "?f=json"
 
-                rj = requests.get(json_url, timeout=10)
+                # Use cached field list when available
+                if json_url in self.arcgis_fields_cache:
+                    for f in self.arcgis_fields_cache[json_url]:
+                        self.fields_list.addItem(f)
+                    self.log(f"Loaded {len(self.arcgis_fields_cache[json_url])} ArcGIS REST fields (cached).")
+                    return
+
+                rj = self.http.get(json_url, timeout=10)
                 rj.raise_for_status()
                 data = rj.json()
 
                 fields = [f["name"] for f in data.get("fields", []) if "name" in f]
+                # Cache to avoid repeating layer metadata requests
+                self.arcgis_fields_cache[json_url] = fields
                 for f in fields:
                     self.fields_list.addItem(f)
                 self.log(f"Loaded {len(fields)} ArcGIS REST fields.")
@@ -256,26 +283,23 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
     # -------------------------------
     # Pre-download data (WFS / ArcGIS)
     # -------------------------------
-    def run_prestep(self) -> None:
-        """Download API features intersecting a 100 km buffer around the application area."""
+    def run_prestep(self, app_gdf_29903: gpd.GeoDataFrame, buffer_geom) -> None:
+        """Download API features intersecting the provided 100 km buffer around the application area."""
         try:
-            app_index = self.combo_app.currentIndex()
             api_index = self.combo_api.currentIndex()
-            if app_index < 0 or api_index < 0:
+            if api_index < 0:
                 return
 
             api_name = self.combo_api.currentText()
             type_name = self.wfs_layers_info.get(api_name)
-            cache_key = (api_name, app_index)
+            app_layer = self.shp_layers[self.combo_app.currentIndex()]
+            app_uri = app_layer.dataProvider().dataSourceUri()
+            cache_key = (api_name, app_uri)
             if cache_key in self.api_pre_filtered:
                 self.log("Using cached preprocessed data.")
                 return
 
-            # Read application layer
-            app_layer = self.shp_layers[app_index]
-            app_gdf = gpd.read_file(app_layer.dataProvider().dataSourceUri())
-            app_gdf_29903, _, _ = self._to_metric_gdf(app_gdf)
-            buffer_geom = app_gdf_29903.unary_union.buffer(100000)
+            minx, miny, maxx, maxy = buffer_geom.bounds
 
             # Case 1: WFS GetFeature (GeoJSON)
             if type_name:
@@ -287,8 +311,10 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                         "request": "GetFeature",
                         "typename": type_name,
                         "outputFormat": "application/json",
+                        "srsName": "EPSG:29903",
+                        "bbox": f"{minx},{miny},{maxx},{maxy},EPSG:29903",
                     }
-                    r = requests.get(wfs_url, params=params, timeout=60)
+                    r = self.http.get(wfs_url, params=params, timeout=60)
                     r.raise_for_status()
                     api_gdf = gpd.read_file(io.StringIO(r.text)).to_crs(epsg=29903)
                     pre_gdf = api_gdf[api_gdf.geometry.intersects(buffer_geom)].reset_index(drop=True)
@@ -332,7 +358,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 }
 
                 try:
-                    r = requests.get(base_url, params=params, timeout=60)
+                    r = self.http.get(base_url, params=params, timeout=60)
                     r.raise_for_status()
                     data = r.json()
                     feats = data.get("features", [])
@@ -375,21 +401,38 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.warning(self, "Error", "Please select both layers.")
                 return
 
-            cache_key = (api_name, app_index)
+            
+            # Read application layer once
+            app_layer = self.shp_layers[app_index]
+            app_uri = app_layer.dataProvider().dataSourceUri()
+            app_gdf = gpd.read_file(app_uri)
+            app_gdf_29903, _, _ = self._to_metric_gdf(app_gdf)
+
+            # Build buffer once (100 km)
+            app_union = app_gdf_29903.unary_union
+            app_centroid = app_union.centroid
+            user_buffer_geom = app_union.buffer(100000)
+
+            # Pre-download / cache API features only when running (not when switching dropdowns)
+            try:
+                QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+            except Exception:
+                pass
+            try:
+                self.run_prestep(app_gdf_29903, user_buffer_geom)
+            finally:
+                try:
+                    QtWidgets.QApplication.restoreOverrideCursor()
+                except Exception:
+                    pass
+
+            cache_key = (api_name, app_uri)
             pre_gdf = self.api_pre_filtered.get(cache_key)
             if pre_gdf is None or pre_gdf.empty:
                 QtWidgets.QMessageBox.warning(self, "Error", "Preprocessed data is empty.")
                 return
 
-            # Read application layer
-            app_layer = self.shp_layers[app_index]
-            app_gdf = gpd.read_file(app_layer.dataProvider().dataSourceUri())
-            app_gdf_29903, _, _ = self._to_metric_gdf(app_gdf)
-
-            # Intersect with user buffer (100 km)
-            app_union = app_gdf_29903.unary_union
-            app_centroid = app_union.centroid
-            user_buffer_geom = app_union.buffer(100000)
+            # Extra safety filter (should already be within buffer)
             result_gdf = pre_gdf[pre_gdf.geometry.intersects(user_buffer_geom)]
             if result_gdf.empty:
                 QtWidgets.QMessageBox.information(self, "No Results", "No features found within the 100 km buffer.")
@@ -408,21 +451,22 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 angle_deg = math.degrees(math.atan2(dx, dy))
                 return (angle_deg + 360) % 360
 
-            distances, azimuths, dirs = [], [], []
-            for geom in result_gdf.geometry:
-                nearest_pt_on_app = nearest_points(geom, app_union.boundary)[1]
-                dist = geom.distance(nearest_pt_on_app)
-                angle = azimuth_geographic(app_centroid, nearest_pt_on_app)
-                distances.append(dist)
-                azimuths.append(round(angle, 2))
-                dirs.append(azimuth_to_dir(angle))
+            # Compute distance in a vectorized way, then only compute azimuth for the nearest feature.
+            # (Much faster when the API returns many features.)
+            dist_series = result_gdf.geometry.distance(app_union.boundary)
+            nearest_idx = dist_series.idxmin()
+            nearest_row = result_gdf.loc[[nearest_idx]].copy().reset_index(drop=True)
 
-            result_gdf["Distance_m"] = distances
-            result_gdf["Direction (°)"] = azimuths
-            result_gdf["Direction"] = dirs
+            nearest_geom = nearest_row.geometry.iloc[0]
+            nearest_pt_on_app = nearest_points(nearest_geom, app_union.boundary)[1]
+            dist = float(dist_series.loc[nearest_idx])
+            angle = azimuth_geographic(app_centroid, nearest_pt_on_app)
+            nearest_row["Distance_m"] = [dist]
+            nearest_row["Direction (°)"] = [round(angle, 2)]
+            nearest_row["Direction"] = [azimuth_to_dir(angle)]
 
             # Keep only the nearest feature
-            result_gdf = result_gdf.sort_values("Distance_m", ascending=True).head(1).reset_index(drop=True)
+            result_gdf = nearest_row
 
             # Determine export columns
             selected_fields = [item.text() for item in self.fields_list.selectedItems()]
