@@ -6,35 +6,25 @@ Description
 -----------
 QGIS dialog for nearest-feature analysis between a local "Application Area"
 (vector layer) and a remote API layer (EPA WFS or ArcGIS Feature Service / Map Server).
-The tool:
-  - Normalizes all analysis to EPSG:29903 (Irish Grid)
-  - Pre-downloads API features within 100 km of the application area
-  - Computes nearest distance and geographic azimuth (0° = North, clockwise)
-  - Exports a CSV with the single nearest feature
-  - Displays a Matplotlib figure showing centroid, nearest points, and an arrow
 
-Provenance Disclosure
----------------------
-This file was originally prototyped with assistance from a large language model
-(GPT-family). It has been refactored, reviewed, and documented by the author to
-meet engineering and academic transparency standards. All responsibility for the
-final code lies with the author.
+Enhancements in this version
+----------------------------
+- Keep FULL WFS capabilities listed in "Select API"
+- Cache WFS capabilities to disk (faster startup, fewer network failures)
+- Cache WFS/ArcGIS fields to disk (faster switching, fewer repeated calls)
+- Increase timeouts and add HTTP retries to reduce "read timeout=10" errors
 
 Requirements
 ------------
 - QGIS (PyQt5, qgis.core)
 - geopandas, shapely, requests, owslib
 - matplotlib (for the figure window)
-
-Notes
------
-- Network calls are made directly to EPA WFS and ArcGIS REST endpoints.
-- Only the single nearest feature is exported.
 """
 
 from PyQt5 import QtWidgets, uic
 from PyQt5.QtCore import Qt
 from qgis.core import QgsProject, QgsVectorLayer
+
 import geopandas as gpd
 import os
 import requests
@@ -46,9 +36,30 @@ import io
 import math
 import traceback
 from pathlib import Path
+import json
+import time
+
+# requests retry
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 class NearestAnalysisDialog(QtWidgets.QDialog):
+    # -------------------------------
+    # Tunables (stability + performance)
+    # -------------------------------
+    WFS_URL = "https://gis.epa.ie/geoserver/EPA/wfs"
+
+    # Use tuple timeout: (connect_timeout_seconds, read_timeout_seconds)
+    REQUEST_TIMEOUT = (10, 120)
+
+    # Retries for transient network errors
+    RETRY_TOTAL = 3
+    RETRY_BACKOFF = 0.8  # seconds multiplier
+
+    # Disk cache expiry for capabilities (seconds)
+    CAPABILITIES_CACHE_TTL = 24 * 3600  # 24 hours
+
     def __init__(self, parent=None):
         super().__init__()
         uic.loadUi(os.path.join(os.path.dirname(__file__), "Nearest_Analysis_dialog_base.ui"), self)
@@ -66,18 +77,107 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             self.fields_list.itemSelectionChanged.connect(self.show_selected_fields)
 
         # State
-        self.wfs_layers_info = {}
-        # Cache pre-filtered API GeoDataFrames.
-        # Keyed by (api_display_name, app_layer_data_source_uri)
-        self.api_pre_filtered = {}
-        # Caches to avoid repeated network calls when switching selections
-        self.wfs_fields_cache = {}      # key: type_name -> [field names]
-        self.arcgis_fields_cache = {}   # key: json_url -> [field names]
+        self.wfs_layers_info = {}      # display_name -> type_name
+        self.api_pre_filtered = {}     # cache pre-filtered API GeoDataFrames keyed by (api_display_name, app_layer_uri)
 
-        # Reuse a single HTTP session for better performance (keep-alive, connection pooling)
+        self.wfs_fields_cache = {}     # type_name -> [field names] (memory)
+        self.arcgis_fields_cache = {}  # json_url -> [field names] (memory)
+
+        # Disk cache paths
+        self.cache_dir = self._get_cache_dir()
+        self.cap_cache_path = self.cache_dir / "wfs_capabilities_layers.json"
+        self.fields_cache_path = self.cache_dir / "api_fields_cache.json"
+
+        # Load field caches from disk (if any)
+        self._load_fields_cache_from_disk()
+
+        # Reuse a single HTTP session for better performance
         self.http = requests.Session()
+        self._configure_http_session()
 
         self.populate_layers()
+
+    # -------------------------------
+    # Cache helpers
+    # -------------------------------
+    def _get_cache_dir(self) -> Path:
+        """
+        Create a user-writable cache directory.
+        Use home directory to avoid permission issues.
+        """
+        d = Path.home() / ".nearest_analysis_cache"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # fallback: plugin folder (may fail if not writable)
+            d = Path(os.path.dirname(__file__)) / ".nearest_analysis_cache"
+            d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _load_json(self, path: Path):
+        try:
+            if path.exists():
+                with path.open("r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return None
+
+    def _save_json(self, path: Path, data) -> None:
+        try:
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp.replace(path)
+        except Exception as e:
+            self.log(f"Cache write failed: {e}")
+
+    def _load_fields_cache_from_disk(self) -> None:
+        """
+        Disk format:
+        {
+          "wfs": { "EPA:layer": ["field1","field2", ...], ... },
+          "arcgis": { "https://.../?f=json": ["field1", ...], ... }
+        }
+        """
+        data = self._load_json(self.fields_cache_path)
+        if not isinstance(data, dict):
+            return
+        wfs = data.get("wfs")
+        arc = data.get("arcgis")
+        if isinstance(wfs, dict):
+            self.wfs_fields_cache.update({k: v for k, v in wfs.items() if isinstance(v, list)})
+        if isinstance(arc, dict):
+            self.arcgis_fields_cache.update({k: v for k, v in arc.items() if isinstance(v, list)})
+
+    def _flush_fields_cache_to_disk(self) -> None:
+        data = {
+            "wfs": self.wfs_fields_cache,
+            "arcgis": self.arcgis_fields_cache
+        }
+        self._save_json(self.fields_cache_path, data)
+
+    # -------------------------------
+    # HTTP session config (retry/keepalive)
+    # -------------------------------
+    def _configure_http_session(self) -> None:
+        retry = Retry(
+            total=self.RETRY_TOTAL,
+            connect=self.RETRY_TOTAL,
+            read=self.RETRY_TOTAL,
+            status=self.RETRY_TOTAL,
+            backoff_factor=self.RETRY_BACKOFF,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset(["GET", "POST"]),
+            raise_on_status=False,
+            respect_retry_after_header=True,
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+        self.http.mount("http://", adapter)
+        self.http.mount("https://", adapter)
+
+        # Optional: a polite User-Agent
+        self.http.headers.update({"User-Agent": "NearestAnalysisQGIS/1.0"})
 
     # -------------------------------
     # Logging helpers
@@ -134,10 +234,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         self.shp_layers = []
         self.api_layers = []
         self.wfs_layers_info.clear()
-        # NOTE: do not clear self.api_pre_filtered here.
-        # The dialog may call populate_layers multiple times; clearing the cache would force
-        # re-downloading large API layers again. Cache keys include the app layer URI so it
-        # stays safe across layer selection changes.
 
         # Collect vector layers from the current QGIS project
         for layer in QgsProject.instance().mapLayers().values():
@@ -151,20 +247,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                     self.combo_api.addItem(name)
                     self.api_layers.append(layer)
 
-        # Load EPA WFS contents for user convenience
-        try:
-            wfs_url = "https://gis.epa.ie/geoserver/EPA/wfs"
-            wfs = WebFeatureService(url=wfs_url, version='1.1.0')
-            for layer_name, layer_obj in wfs.contents.items():
-                type_name = layer_name if layer_name.startswith("EPA:") else f"EPA:{layer_name}"
-                title = getattr(layer_obj, "title", layer_name)
-                display_name = f"{title} ({type_name})"
-                self.combo_api.addItem(display_name)
-                self.wfs_layers_info[display_name] = type_name
-            self.log(f"Loaded {len(self.wfs_layers_info)} WFS layers.")
-        except Exception as e:
-            self.log(f"Failed to access WFS service: {e}")
-
         # Prefill fields_list using the first shapefile (if available)
         if hasattr(self, "fields_list") and self.shp_layers:
             self.fields_list.clear()
@@ -174,15 +256,94 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             except Exception:
                 pass
 
+        # 1) Load WFS layers from disk cache first (fast startup)
+        used_cache = self._load_wfs_layers_from_cache()
+        if used_cache:
+            self.log(f"Loaded {len(self.wfs_layers_info)} WFS layers from cache.")
+
+        # 2) Refresh WFS capabilities if cache missing/expired
+        #    (still FULL capabilities, but reduces frequency)
+        try:
+            if (not used_cache) or self._is_capabilities_cache_expired():
+                self._refresh_wfs_capabilities_online()
+        except Exception as e:
+            self.log(f"Failed to refresh WFS capabilities online: {e}")
+
         # Re-bind signals (avoid duplicates)
-        for sig, slot in [
-            (self.combo_api.currentIndexChanged, self.update_fields_for_api),
-        ]:
-            try:
-                sig.disconnect(slot)
-            except Exception:
-                pass
-            sig.connect(slot)
+        try:
+            self.combo_api.currentIndexChanged.disconnect(self.update_fields_for_api)
+        except Exception:
+            pass
+        self.combo_api.currentIndexChanged.connect(self.update_fields_for_api)
+
+    def _is_capabilities_cache_expired(self) -> bool:
+        try:
+            if not self.cap_cache_path.exists():
+                return True
+            mtime = self.cap_cache_path.stat().st_mtime
+            return (time.time() - mtime) > self.CAPABILITIES_CACHE_TTL
+        except Exception:
+            return True
+
+    def _load_wfs_layers_from_cache(self) -> bool:
+        """
+        Cache format:
+        {
+          "generated_at": 1234567890,
+          "layers": [
+            {"display_name": "...", "type_name": "EPA:...", "title": "..."},
+            ...
+          ]
+        }
+        """
+        data = self._load_json(self.cap_cache_path)
+        if not isinstance(data, dict):
+            return False
+        layers = data.get("layers")
+        if not isinstance(layers, list) or not layers:
+            return False
+
+        count_before = len(self.wfs_layers_info)
+        for item in layers:
+            if not isinstance(item, dict):
+                continue
+            display_name = item.get("display_name")
+            type_name = item.get("type_name")
+            if display_name and type_name:
+                self.combo_api.addItem(display_name)
+                self.wfs_layers_info[display_name] = type_name
+
+        return len(self.wfs_layers_info) > count_before
+
+    def _refresh_wfs_capabilities_online(self) -> None:
+        """
+        Load FULL WFS capabilities and populate the Select API list.
+        Also writes to disk cache.
+        """
+        self.log("Refreshing WFS capabilities (full list)...")
+        wfs = WebFeatureService(url=self.WFS_URL, version="1.1.0")
+
+        layers_out = []
+        added = 0
+        for layer_name, layer_obj in wfs.contents.items():
+            type_name = layer_name if layer_name.startswith("EPA:") else f"EPA:{layer_name}"
+            title = getattr(layer_obj, "title", layer_name)
+            display_name = f"{title} ({type_name})"
+
+            if display_name not in self.wfs_layers_info:
+                self.combo_api.addItem(display_name)
+                self.wfs_layers_info[display_name] = type_name
+                added += 1
+
+            layers_out.append({
+                "display_name": display_name,
+                "type_name": type_name,
+                "title": title
+            })
+
+        # Save cache
+        self._save_json(self.cap_cache_path, {"generated_at": int(time.time()), "layers": layers_out})
+        self.log(f"Loaded {len(self.wfs_layers_info)} WFS layers. (+{added} refreshed)")
 
     # -------------------------------
     # Update fields for API (WFS + ArcGIS)
@@ -200,40 +361,59 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         # Case 1: WFS via DescribeFeatureType
         type_name = self.wfs_layers_info.get(api_name)
         if type_name:
-            # Use cached field list when available
+            # Use cached field list when available (memory)
             if type_name in self.wfs_fields_cache:
-                for f in self.wfs_fields_cache[type_name]:
+                fields = self.wfs_fields_cache[type_name]
+                for f in fields:
                     self.fields_list.addItem(f)
-                self.log(f"Loaded {len(self.wfs_fields_cache[type_name])} WFS fields (cached).")
+                self.log(f"Loaded {len(fields)} WFS fields (cached).")
                 return
+
+            # Fetch fields via DescribeFeatureType
             try:
-                wfs_url = "https://gis.epa.ie/geoserver/EPA/wfs"
                 params = {
                     "service": "WFS",
                     "version": "1.1.0",
                     "request": "DescribeFeatureType",
                     "typename": type_name
                 }
-                r = self.http.get(wfs_url, params=params, timeout=10)
+                r = self.http.get(self.WFS_URL, params=params, timeout=self.REQUEST_TIMEOUT)
                 r.raise_for_status()
                 root = ET.fromstring(r.content)
 
                 def strip_ns(tag):
-                    return tag.split('}', 1)[-1] if '}' in tag else tag
+                    return tag.split("}", 1)[-1] if "}" in tag else tag
 
                 fields = []
+                # More targeted parsing: only consider xsd:element definitions
                 for element in root.iter():
                     if strip_ns(element.tag) == "element":
                         name_attr = element.attrib.get("name")
                         type_attr = element.attrib.get("type")
-                        if name_attr and type_attr and not name_attr.lower().endswith("geom"):
-                            fields.append(name_attr)
+                        if not name_attr or not type_attr:
+                            continue
+                        # Skip likely geometry fields (common naming patterns)
+                        low = name_attr.lower()
+                        if low.endswith("geom") or low in ("geom", "geometry", "the_geom", "shape"):
+                            continue
+                        fields.append(name_attr)
 
+                # De-duplicate while preserving order
+                seen = set()
+                fields_unique = []
                 for f in fields:
+                    if f not in seen:
+                        seen.add(f)
+                        fields_unique.append(f)
+
+                for f in fields_unique:
                     self.fields_list.addItem(f)
-                # Cache to avoid repeating DescribeFeatureType
-                self.wfs_fields_cache[type_name] = fields
-                self.log(f"Loaded {len(fields)} WFS fields.")
+
+                # Cache (memory + disk)
+                self.wfs_fields_cache[type_name] = fields_unique
+                self._flush_fields_cache_to_disk()
+
+                self.log(f"Loaded {len(fields_unique)} WFS fields.")
             except Exception as e:
                 self.log(f"Failed to load WFS fields: {e}")
             return
@@ -258,20 +438,24 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 json_url = base_url.split("/query")[0]
                 json_url = json_url.rstrip("/query") + "?f=json"
 
-                # Use cached field list when available
+                # Use cached field list when available (memory/disk already loaded into memory)
                 if json_url in self.arcgis_fields_cache:
-                    for f in self.arcgis_fields_cache[json_url]:
+                    fields = self.arcgis_fields_cache[json_url]
+                    for f in fields:
                         self.fields_list.addItem(f)
-                    self.log(f"Loaded {len(self.arcgis_fields_cache[json_url])} ArcGIS REST fields (cached).")
+                    self.log(f"Loaded {len(fields)} ArcGIS REST fields (cached).")
                     return
 
-                rj = self.http.get(json_url, timeout=10)
+                rj = self.http.get(json_url, timeout=self.REQUEST_TIMEOUT)
                 rj.raise_for_status()
                 data = rj.json()
 
-                fields = [f["name"] for f in data.get("fields", []) if "name" in f]
-                # Cache to avoid repeating layer metadata requests
+                fields = [f["name"] for f in data.get("fields", []) if isinstance(f, dict) and "name" in f]
+
+                # Cache (memory + disk)
                 self.arcgis_fields_cache[json_url] = fields
+                self._flush_fields_cache_to_disk()
+
                 for f in fields:
                     self.fields_list.addItem(f)
                 self.log(f"Loaded {len(fields)} ArcGIS REST fields.")
@@ -295,6 +479,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             app_layer = self.shp_layers[self.combo_app.currentIndex()]
             app_uri = app_layer.dataProvider().dataSourceUri()
             cache_key = (api_name, app_uri)
+
             if cache_key in self.api_pre_filtered:
                 self.log("Using cached preprocessed data.")
                 return
@@ -304,7 +489,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             # Case 1: WFS GetFeature (GeoJSON)
             if type_name:
                 try:
-                    wfs_url = "https://gis.epa.ie/geoserver/EPA/wfs"
                     params = {
                         "service": "WFS",
                         "version": "1.1.0",
@@ -314,7 +498,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                         "srsName": "EPSG:29903",
                         "bbox": f"{minx},{miny},{maxx},{maxy},EPSG:29903",
                     }
-                    r = self.http.get(wfs_url, params=params, timeout=60)
+                    r = self.http.get(self.WFS_URL, params=params, timeout=self.REQUEST_TIMEOUT)
                     r.raise_for_status()
                     api_gdf = gpd.read_file(io.StringIO(r.text)).to_crs(epsg=29903)
                     pre_gdf = api_gdf[api_gdf.geometry.intersects(buffer_geom)].reset_index(drop=True)
@@ -343,7 +527,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 if not base_url.endswith("/query"):
                     base_url = base_url.rstrip("/") + "/query"
 
-                minx, miny, maxx, maxy = buffer_geom.bounds
                 bbox_str = f"{minx},{miny},{maxx},{maxy}"
 
                 params = {
@@ -358,7 +541,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 }
 
                 try:
-                    r = self.http.get(base_url, params=params, timeout=60)
+                    r = self.http.get(base_url, params=params, timeout=self.REQUEST_TIMEOUT)
                     r.raise_for_status()
                     data = r.json()
                     feats = data.get("features", [])
@@ -401,7 +584,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.warning(self, "Error", "Please select both layers.")
                 return
 
-            
             # Read application layer once
             app_layer = self.shp_layers[app_index]
             app_uri = app_layer.dataProvider().dataSourceUri()
@@ -451,8 +633,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 angle_deg = math.degrees(math.atan2(dx, dy))
                 return (angle_deg + 360) % 360
 
-            # Compute distance in a vectorized way, then only compute azimuth for the nearest feature.
-            # (Much faster when the API returns many features.)
+            # Vectorized distance, then compute azimuth for nearest only
             dist_series = result_gdf.geometry.distance(app_union.boundary)
             nearest_idx = dist_series.idxmin()
             nearest_row = result_gdf.loc[[nearest_idx]].copy().reset_index(drop=True)
@@ -465,7 +646,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             nearest_row["Direction (°)"] = [round(angle, 2)]
             nearest_row["Direction"] = [azimuth_to_dir(angle)]
 
-            # Keep only the nearest feature
             result_gdf = nearest_row
 
             # Determine export columns
