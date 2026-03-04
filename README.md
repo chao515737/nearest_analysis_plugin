@@ -48,10 +48,9 @@ Contents:
 ### Reproducing the Workflow
 
 1. Load `input_polygons.gpkg` into QGIS.
-2. Layer -> Add Layer -> Add WFS/OGC API, connect to https://gis.epa.ie/geoserver/EPA/wfs
-3. Load `api_snapshot.geojson`.
-4. Run the Nearest Analysis plugin.
-5. Export the resulting CSV.
+2. Load `api_snapshot.geojson`.
+3. Run the Nearest Analysis plugin.
+4. Export the resulting CSV.
 
 This allows the workflow to be reproduced without network access.
 
