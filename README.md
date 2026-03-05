@@ -17,6 +17,11 @@ This modular design allows users to adapt the plugin for other datasets or resea
 - geopandas, shapely, requests, owslib, matplotlib
 
 ## Installation
+Method 1 (Recommended)
+The tool can be run directly by installing Ireland Nearest Analysis (Irish Grid + EPA API) through
+QGIS → Plugins → Manage and Install Plugins.
+
+Method 2 (Manual installation from GitHub)
 1. Download the repository from GitHub as a ZIP file, which will be automatically named nearest_analysis_plugin-main.zip.
 2. Unzip it — inside the extracted folder nearest_analysis_plugin-main, you will find another folder named nearest_analysis_plugin.
 3. Copy that inner folder (not the outer one) to your QGIS plugin directory and rename it to `nearest_analysis`:
