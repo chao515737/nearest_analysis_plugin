@@ -79,6 +79,9 @@ and nearest features (red) with connecting arrows:
 ## License
 This project is licensed under the MIT License – see [LICENSE](./LICENSE) for details.
 
+## Data Source
+Contains data from the Environmental Protection Agency (EPA), licensed under CC BY 4.0.
+
 ## Citation
 
 If you use this software in your research, please cite:
