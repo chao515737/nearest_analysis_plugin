@@ -12,6 +12,7 @@ The tool:
   - Computes nearest distance and geographic azimuth (0° = North, clockwise)
   - Exports a CSV with the single nearest feature
   - Displays a Matplotlib figure showing centroid, nearest points, and an arrow
+  - Exports the figure to PNG/PDF with EPA attribution on the map
 
 Notes
 -----
@@ -49,6 +50,9 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         # ---- WFS endpoint (EPA) ----
         self.WFS_URL = "https://gis.epa.ie/geoserver/EPA/wfs"
         self.WFS_VERSION = "1.1.0"
+
+        # ---- Attribution text (EPA requirement) ----
+        self.EPA_ATTRIBUTION = "Contains data from the Environmental Protection Agency (EPA), licensed under CC BY 4.0"
 
         # Buttons
         self.run_btn.clicked.connect(self.run_analysis)
@@ -459,10 +463,10 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             self.log(traceback.format_exc())
 
     # -------------------------------
-    # Run Analysis → CSV + Matplotlib Figure Window
+    # Run Analysis → CSV + Matplotlib Figure Window + Export Map
     # -------------------------------
     def run_analysis(self) -> None:
-        """Export the single nearest feature to CSV and display a figure window."""
+        """Export the single nearest feature to CSV, display a figure window, and export the map to PNG/PDF."""
         try:
             import matplotlib.pyplot as plt
 
@@ -544,35 +548,66 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 selected_fields = [c for c in result_gdf.columns if c != "geometry"]
             export_cols = selected_fields + ["Distance_m", "Direction (°)", "Direction"]
 
-            # Save CSV
+            # -------------------------------
+            # Save CSV (safe export with attribution)
+            # -------------------------------
             output_csv, _ = QtWidgets.QFileDialog.getSaveFileName(
-                self, "Save CSV", os.path.expanduser("~/Nearest_Result.csv"), "CSV Files (*.csv)"
+                self,
+                "Save CSV",
+                os.path.expanduser("~/Nearest_Result.csv"),
+                "CSV Files (*.csv)"
             )
+
             if not output_csv:
                 self.log("CSV save cancelled by user.")
                 return
 
-            result_gdf[export_cols].to_csv(output_csv, index=False, encoding="utf-8-sig")
-            self.log(f"CSV saved: {output_csv}")
+            # Ensure extension
+            if not output_csv.lower().endswith(".csv"):
+                output_csv += ".csv"
+
+            try:
+                with open(output_csv, "w", encoding="utf-8-sig", newline="") as f:
+                    # Attribution lines (EPA requirement)
+                    f.write(
+                        "# Contains data from the Environmental Protection Agency (EPA), licensed under CC BY 4.0\n")
+                    f.write("# Source: EPA API\n")
+
+                    # Write data
+                    result_gdf[export_cols].to_csv(
+                        f,
+                        index=False,
+                        lineterminator="\n"
+                    )
+
+                self.log(f"CSV saved: {output_csv}")
+                self.log("EPA attribution added to CSV header.")
+
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "CSV Export Error", str(e))
+                self.log(f"CSV export failed: {e}")
+
+            # -------------------------------
+            # Plot (Matplotlib)
+            # -------------------------------
             self.log("Opening Matplotlib Figure Window...")
 
-            # Plot
             nearest_geom = result_gdf.geometry.iloc[0]
             nearest_pt_on_app = nearest_points(nearest_geom, app_union.boundary)[1]
             nearest_pt_on_api = nearest_points(nearest_geom, app_union.boundary)[0]
 
             fig, ax = plt.subplots(figsize=(10, 10))
-            app_gdf_29903.boundary.plot(ax=ax, color='blue', linewidth=2, label="Application Area")
-            result_gdf.plot(ax=ax, color='cyan', alpha=0.6, label="Nearest Feature")
+            app_gdf_29903.boundary.plot(ax=ax, color="blue", linewidth=2, label="Application Area")
+            result_gdf.plot(ax=ax, color="cyan", alpha=0.6, label="Nearest Feature")
 
             gpd.GeoDataFrame(geometry=[app_centroid], crs="EPSG:29903").plot(
-                ax=ax, color='red', marker='o', markersize=60, label="Centroid"
+                ax=ax, color="red", marker="o", markersize=60, label="Centroid"
             )
             gpd.GeoDataFrame(geometry=[nearest_pt_on_app], crs="EPSG:29903").plot(
-                ax=ax, color='orange', marker='x', markersize=100, label="Nearest Point - App"
+                ax=ax, color="orange", marker="x", markersize=100, label="Nearest Point - App"
             )
             gpd.GeoDataFrame(geometry=[nearest_pt_on_api], crs="EPSG:29903").plot(
-                ax=ax, color='green', marker='o', markersize=100, label="Nearest Point - API"
+                ax=ax, color="green", marker="o", markersize=100, label="Nearest Point - API"
             )
 
             ax.annotate(
@@ -580,17 +615,55 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 f"{result_gdf['Direction (°)'].iloc[0]}° ({result_gdf['Direction'].iloc[0]})",
                 xy=(nearest_pt_on_api.x, nearest_pt_on_api.y),
                 xytext=(app_centroid.x, app_centroid.y),
-                arrowprops=dict(facecolor='red', width=2, headwidth=10, shrink=0.05),
-                fontsize=10, color='darkred', ha='center'
+                arrowprops=dict(facecolor="red", width=2, headwidth=10, shrink=0.05),
+                fontsize=10,
+                color="darkred",
+                ha="center",
             )
 
-            plt.legend()
-            plt.title("Nearest Feature and Geographic Azimuth (EPSG:29903)")
-            plt.xlabel("Easting (m)")
-            plt.ylabel("Northing (m)")
-            plt.grid(True)
-            plt.axis('equal')
-            plt.tight_layout()
+            ax.legend()
+            ax.set_title("Nearest Feature and Geographic Azimuth (EPSG:29903)")
+            ax.set_xlabel("Easting (m)")
+            ax.set_ylabel("Northing (m)")
+            ax.grid(True)
+            ax.set_aspect("equal", adjustable="box")
+
+            # ---- Add attribution on the figure (visible in both window and exported file) ----
+            fig.text(
+                0.5,
+                0.01,
+                self.EPA_ATTRIBUTION,
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+            # Leave room so the footer isn't clipped
+            fig.tight_layout()
+            fig.subplots_adjust(bottom=0.06)
+
+            # -------------------------------
+            # Export Map (PNG/PDF) with attribution
+            # -------------------------------
+            output_map, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "Save Map (PNG/PDF)",
+                os.path.expanduser("~/Nearest_Result.png"),
+                "PNG (*.png);;PDF (*.pdf)",
+            )
+
+            if output_map:
+                lower = output_map.lower()
+                if not (lower.endswith(".png") or lower.endswith(".pdf")):
+                    output_map += ".png"
+
+                # bbox_inches="tight" helps avoid clipping; bottom margin is already reserved
+                fig.savefig(output_map, dpi=300, bbox_inches="tight")
+                self.log(f"Map saved: {output_map}")
+                self.log(f"Map attribution added: {self.EPA_ATTRIBUTION}")
+            else:
+                self.log("Map export cancelled by user.")
+
             plt.show()
 
         except Exception as e:
