@@ -212,6 +212,8 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         # stays safe across layer selection changes.
 
         # Collect vector layers from the current QGIS project
+        # combo_app: only local shapefile/application layers
+        # combo_api: ONLY EPA WFS layers (do not add project API layers)
         for layer in QgsProject.instance().mapLayers().values():
             if isinstance(layer, QgsVectorLayer):
                 provider = layer.providerType().lower()
@@ -219,9 +221,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 if provider == "ogr" or name.lower().endswith(".shp"):
                     self.combo_app.addItem(name)
                     self.shp_layers.append(layer)
-                else:
-                    self.combo_api.addItem(name)
-                    self.api_layers.append(layer)
 
         # Load EPA WFS contents for user convenience (capabilities)
         try:
