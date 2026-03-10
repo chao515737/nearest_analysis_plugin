@@ -88,3 +88,9 @@ If you use this software in your research, please cite:
 
 chao515737. (2026). *Nearest Analysis QGIS Plugin*. Zenodo.  
 https://doi.org/10.5281/zenodo.18262401
+
+## Community discussion
+
+This plugin was shared with the GIS community for feedback:
+
+https://gis.stackexchange.com/questions/500228/looking-for-feedback-on-a-qgis-plugin-for-nearest-feature-analysis-epa-api-ire
