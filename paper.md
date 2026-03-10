@@ -1,5 +1,5 @@
 ---
-title: "Nearest Analysis: A QGIS Plugin for Automated Nearest-Feature Spatial Analysis"
+title: "Ireland Nearest Analysis (EPA API + EPSG:29903)"
 tags:
   - QGIS
   - GIS
