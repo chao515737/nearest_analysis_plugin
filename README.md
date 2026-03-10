@@ -19,7 +19,7 @@ This modular design allows users to adapt the plugin for other datasets or resea
 ## Installation
 Method 1 (Recommended)
 
-The tool can be run directly by installing Ireland Nearest Analysis (Irish Grid + EPA API) through
+The tool can be run directly by installing Ireland Nearest Analysis (EPA API + EPSG:29903) through
 QGIS → Plugins → Manage and Install Plugins.
 
 Method 2 (Manual installation from GitHub)
