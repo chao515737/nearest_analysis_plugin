@@ -157,7 +157,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         for lyr in QgsProject.instance().mapLayers().values():
             if isinstance(lyr, QgsVectorLayer) and lyr.providerType().upper() == "WFS":
                 src = (lyr.source() or "")
-                # Commonly WFS source includes the typename
                 if type_name in src:
                     self.log(f"WFS layer already loaded: {lyr.name()}")
                     return
@@ -168,7 +167,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         uri.setParam("typename", type_name)
         uri.setParam("version", self.WFS_VERSION)
 
-        # Note: keep layer title the same as combo display
         wfs_layer = QgsVectorLayer(uri.uri(), api_name, "WFS")
         if not wfs_layer.isValid():
             msg = f"Failed to load WFS layer into QGIS: {api_name}"
@@ -206,10 +204,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         self.shp_layers = []
         self.api_layers = []
         self.wfs_layers_info.clear()
-        # NOTE: do not clear self.api_pre_filtered here.
-        # The dialog may call populate_layers multiple times; clearing the cache would force
-        # re-downloading large API layers again. Cache keys include the app layer URI so it
-        # stays safe across layer selection changes.
 
         # Collect vector layers from the current QGIS project
         # combo_app: only local shapefile/application layers
@@ -308,7 +302,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
                 for f in fields:
                     self.fields_list.addItem(f)
-                # Cache to avoid repeating DescribeFeatureType
                 self.wfs_fields_cache[type_name] = fields
                 self.log(f"Loaded {len(fields)} WFS fields.")
             except Exception as e:
@@ -335,7 +328,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 json_url = base_url.split("/query")[0]
                 json_url = json_url.rstrip("/query") + "?f=json"
 
-                # Use cached field list when available
                 if json_url in self.arcgis_fields_cache:
                     for f in self.arcgis_fields_cache[json_url]:
                         self.fields_list.addItem(f)
@@ -347,7 +339,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 data = rj.json()
 
                 fields = [f["name"] for f in data.get("fields", []) if "name" in f]
-                # Cache to avoid repeating layer metadata requests
                 self.arcgis_fields_cache[json_url] = fields
                 for f in fields:
                     self.fields_list.addItem(f)
@@ -468,6 +459,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         """Export the single nearest feature to CSV, display a figure window, and export the map to PNG/PDF."""
         try:
             import matplotlib.pyplot as plt
+            from matplotlib.patches import FancyArrowPatch
 
             self.log("All computations use EPSG:29903 (Irish Grid).")
             app_index = self.combo_app.currentIndex()
@@ -487,7 +479,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             app_centroid = app_union.centroid
             user_buffer_geom = app_union.buffer(100000)
 
-            # Pre-download / cache API features only when running (not when switching dropdowns)
+            # Pre-download / cache API features only when running
             try:
                 QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
             except Exception:
@@ -506,39 +498,49 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.warning(self, "Error", "Preprocessed data is empty.")
                 return
 
-            # Extra safety filter (should already be within buffer)
             result_gdf = pre_gdf[pre_gdf.geometry.intersects(user_buffer_geom)]
             if result_gdf.empty:
                 QtWidgets.QMessageBox.information(self, "No Results", "No features found within the 100 km buffer.")
                 return
 
-            # Distance and azimuth helpers
+            # Angle helpers
             def azimuth_to_dir(deg: float) -> str:
                 dirs8 = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
                 idx = int((deg + 22.5) // 45) % 8
                 return dirs8[idx]
 
             def azimuth_geographic(p1, p2) -> float:
-                # 0° points to North; increases clockwise
+                """
+                Geographic azimuth:
+                - 0° = North
+                - clockwise positive
+                - p1 = start point
+                - p2 = end point
+                """
                 dx = p2.x - p1.x
                 dy = p2.y - p1.y
                 angle_deg = math.degrees(math.atan2(dx, dy))
                 return (angle_deg + 360) % 360
 
-            # Compute distance in a vectorized way, then only compute azimuth for the nearest feature.
+            # Find nearest feature by distance from API geometry to app boundary
             dist_series = result_gdf.geometry.distance(app_union.boundary)
             nearest_idx = dist_series.idxmin()
             nearest_row = result_gdf.loc[[nearest_idx]].copy().reset_index(drop=True)
 
             nearest_geom = nearest_row.geometry.iloc[0]
-            nearest_pt_on_app = nearest_points(nearest_geom, app_union.boundary)[1]
+
+            # IMPORTANT:
+            # start point for angle/arrow = app centroid
+            # end point for angle/arrow = nearest point on API geometry
+            nearest_pt_on_api, nearest_pt_on_app = nearest_points(nearest_geom, app_union.boundary)
+
             dist = float(dist_series.loc[nearest_idx])
-            angle = azimuth_geographic(app_centroid, nearest_pt_on_app)
+            angle = azimuth_geographic(app_centroid, nearest_pt_on_api)
+
             nearest_row["Distance_m"] = [dist]
             nearest_row["Direction (°)"] = [round(angle, 2)]
             nearest_row["Direction"] = [azimuth_to_dir(angle)]
 
-            # Keep only the nearest feature
             result_gdf = nearest_row
 
             # Determine export columns
@@ -548,7 +550,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             export_cols = selected_fields + ["Distance_m", "Direction (°)", "Direction"]
 
             # -------------------------------
-            # Save CSV (safe export with attribution)
+            # Save CSV
             # -------------------------------
             output_csv, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
@@ -561,18 +563,13 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 self.log("CSV save cancelled by user.")
                 return
 
-            # Ensure extension
             if not output_csv.lower().endswith(".csv"):
                 output_csv += ".csv"
 
             try:
                 with open(output_csv, "w", encoding="utf-8-sig", newline="") as f:
-                    # Attribution lines (EPA requirement)
-                    f.write(
-                        "# Contains data from the Environmental Protection Agency (EPA), licensed under CC BY 4.0\n")
+                    f.write("# Contains data from the Environmental Protection Agency (EPA), licensed under CC BY 4.0\n")
                     f.write("# Source: EPA API\n")
-
-                    # Write data
                     result_gdf[export_cols].to_csv(
                         f,
                         index=False,
@@ -591,10 +588,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             # -------------------------------
             self.log("Opening Matplotlib Figure Window...")
 
-            nearest_geom = result_gdf.geometry.iloc[0]
-            nearest_pt_on_app = nearest_points(nearest_geom, app_union.boundary)[1]
-            nearest_pt_on_api = nearest_points(nearest_geom, app_union.boundary)[0]
-
             fig, ax = plt.subplots(figsize=(10, 10))
             app_gdf_29903.boundary.plot(ax=ax, color="blue", linewidth=2, label="Application Area")
             result_gdf.plot(ax=ax, color="cyan", alpha=0.6, label="Nearest Feature")
@@ -609,15 +602,37 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 ax=ax, color="green", marker="o", markersize=100, label="Nearest Point - API"
             )
 
-            ax.annotate(
+            # Arrow:
+            # start = combo_app centroid
+            # end   = nearest point on combo_api
+            arrow = FancyArrowPatch(
+                posA=(app_centroid.x, app_centroid.y),
+                posB=(nearest_pt_on_api.x, nearest_pt_on_api.y),
+                arrowstyle="->",
+                mutation_scale=18,
+                linewidth=2,
+                color="red",
+                transform=ax.transData,
+                shrinkA=0,
+                shrinkB=0,
+                zorder=5,
+            )
+            ax.add_patch(arrow)
+
+            # Label
+            label_x = (app_centroid.x + nearest_pt_on_api.x) / 2.0
+            label_y = (app_centroid.y + nearest_pt_on_api.y) / 2.0
+            ax.text(
+                label_x,
+                label_y,
                 f"{round(result_gdf['Distance_m'].iloc[0], 2)} m\n"
                 f"{result_gdf['Direction (°)'].iloc[0]}° ({result_gdf['Direction'].iloc[0]})",
-                xy=(nearest_pt_on_api.x, nearest_pt_on_api.y),
-                xytext=(app_centroid.x, app_centroid.y),
-                arrowprops=dict(facecolor="red", width=2, headwidth=10, shrink=0.05),
                 fontsize=10,
                 color="darkred",
                 ha="center",
+                va="center",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8, edgecolor="none"),
+                zorder=6,
             )
 
             ax.legend()
@@ -627,7 +642,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             ax.grid(True)
             ax.set_aspect("equal", adjustable="box")
 
-            # ---- Add attribution on the figure (visible in both window and exported file) ----
             fig.text(
                 0.5,
                 0.01,
@@ -637,12 +651,11 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 fontsize=8,
             )
 
-            # Leave room so the footer isn't clipped
             fig.tight_layout()
             fig.subplots_adjust(bottom=0.06)
 
             # -------------------------------
-            # Export Map (PNG/PDF) with attribution
+            # Export Map (PNG/PDF)
             # -------------------------------
             output_map, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
@@ -656,7 +669,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 if not (lower.endswith(".png") or lower.endswith(".pdf")):
                     output_map += ".png"
 
-                # bbox_inches="tight" helps avoid clipping; bottom margin is already reserved
                 fig.savefig(output_map, dpi=300, bbox_inches="tight")
                 self.log(f"Map saved: {output_map}")
                 self.log(f"Map attribution added: {self.EPA_ATTRIBUTION}")
