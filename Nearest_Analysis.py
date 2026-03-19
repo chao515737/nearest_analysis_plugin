@@ -6,18 +6,12 @@ Description
 -----------
 QGIS dialog for nearest-feature analysis between a local "Application Area"
 (vector layer) and a remote API layer (EPA WFS or ArcGIS Feature Service / Map Server).
-The tool:
-  - Normalizes all analysis to EPSG:29903 (Irish Grid)
-  - Pre-downloads API features within 100 km of the application area
-  - Computes nearest distance and geographic azimuth (0° = North, clockwise)
-  - Exports a CSV with the single nearest feature
-  - Displays a Matplotlib figure showing centroid, nearest points, and an arrow
-  - Exports the figure to PNG/PDF with EPA attribution on the map
 
-Notes
------
-- Network calls are made directly to EPA WFS and ArcGIS REST endpoints.
-- Only the single nearest feature is exported.
+Native QGIS version:
+- No GeoPandas dependency
+- Uses QgsGeometry / QgsSpatialIndex / QgsCoordinateTransform
+- Keeps EPSG:29903 workflow
+- Keeps CSV export + Matplotlib figure export
 """
 
 from PyQt5 import QtWidgets, uic
@@ -28,18 +22,27 @@ from qgis.core import (
     QgsDataSourceUri,
     QgsMessageLog,
     Qgis,
+    QgsFeature,
+    QgsGeometry,
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsSpatialIndex,
+    QgsRectangle,
+    QgsPointXY,
+    QgsWkbTypes,
 )
-import geopandas as gpd
+import time
 import os
+import csv
+import io
+import json
+import math
+import tempfile
+import traceback
 import requests
 import xml.etree.ElementTree as ET
-from owslib.wfs import WebFeatureService
-from shapely.geometry import shape
-from shapely.ops import nearest_points
-import io
-import math
-import traceback
 from pathlib import Path
+from owslib.wfs import WebFeatureService
 
 
 class NearestAnalysisDialog(QtWidgets.QDialog):
@@ -68,24 +71,25 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
         # State
         self.wfs_layers_info = {}
-        # Cache pre-filtered API GeoDataFrames.
-        # Keyed by (api_display_name, app_layer_data_source_uri)
+        self.shp_layers = []
+        self.api_layers = []
+
+        # Cache: key = (api_display_name, app_layer_uri)
         self.api_pre_filtered = {}
-        # Caches to avoid repeated network calls when switching selections
+
+        # Caches for field metadata
         self.wfs_fields_cache = {}      # key: type_name -> [field names]
         self.arcgis_fields_cache = {}   # key: json_url -> [field names]
 
-        # Reuse a single HTTP session for better performance (keep-alive, connection pooling)
+        # Reuse one session
         self.http = requests.Session()
+        self.http.headers.update({"User-Agent": "QGIS-NearestAnalysis"})
 
-        # ---- OPTIONAL: timeouts (connect_timeout, read_timeout) ----
-        # Meta requests (DescribeFeatureType / ArcGIS layer JSON)
+        # Timeouts
         self.timeout_meta = (10, 120)
-        # Data requests (GetFeature / ArcGIS query)
         self.timeout_data = (10, 180)
 
-        # Optional: some servers are more stable with a User-Agent header
-        self.http.headers.update({"User-Agent": "QGIS-NearestAnalysis"})
+        self.metric_crs = QgsCoordinateReferenceSystem("EPSG:29903")
 
         self.populate_layers()
 
@@ -107,41 +111,168 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         self.log(f"Selected fields: {selected}")
 
     # -------------------------------
-    # CRS conversion → EPSG:29903
+    # CRS / geometry helpers
     # -------------------------------
-    def _to_metric_gdf(self, gdf: gpd.GeoDataFrame):
-        """
-        Ensure GeoDataFrame is in EPSG:29903. If CRS is missing, assume EPSG:4326.
-        Returns (gdf_29903, changed, original_crs)
-        """
-        orig_crs = getattr(gdf, "crs", None)
-        if orig_crs is None:
-            try:
-                gdf = gdf.set_crs(epsg=4326)
-                orig_crs = gdf.crs
-                self.log("Layer has no CRS; assumed EPSG:4326.")
-            except Exception:
-                self.log("Unable to set CRS for the layer.")
-                return gdf, False, None
+    def _transform_geometry(self, geom: QgsGeometry, src_crs: QgsCoordinateReferenceSystem,
+                            dst_crs: QgsCoordinateReferenceSystem = None) -> QgsGeometry:
+        if dst_crs is None:
+            dst_crs = self.metric_crs
+
+        if not geom or geom.isEmpty():
+            return QgsGeometry()
+
+        if not src_crs.isValid():
+            self.log("Invalid source CRS; geometry returned unchanged.")
+            return QgsGeometry(geom)
+
+        if src_crs == dst_crs:
+            return QgsGeometry(geom)
+
+        g = QgsGeometry(geom)
+        try:
+            tr = QgsCoordinateTransform(src_crs, dst_crs, QgsProject.instance())
+            ok = g.transform(tr)
+            if ok != 0:
+                self.log("Geometry transform returned non-zero status.")
+            return g
+        except Exception as e:
+            self.log(f"Geometry transform failed: {e}")
+            return QgsGeometry(geom)
+
+    def _layer_geometries_in_29903(self, layer: QgsVectorLayer):
+        """Return transformed feature list and unary union in EPSG:29903."""
+        feats_29903 = []
+        src_crs = layer.crs()
+
+        union_geom = None
+        for f in layer.getFeatures():
+            geom = f.geometry()
+            if not geom or geom.isEmpty():
+                continue
+            geom_29903 = self._transform_geometry(geom, src_crs, self.metric_crs)
+            if geom_29903.isEmpty():
+                continue
+
+            new_f = QgsFeature()
+            new_f.setGeometry(geom_29903)
+            new_f.setAttributes(f.attributes())
+            new_f.setFields(layer.fields())
+            feats_29903.append(new_f)
+
+            if union_geom is None:
+                union_geom = QgsGeometry(geom_29903)
+            else:
+                try:
+                    union_geom = union_geom.combine(geom_29903)
+                except Exception:
+                    try:
+                        union_geom = union_geom.unaryUnion([union_geom, geom_29903])
+                    except Exception:
+                        pass
+
+        return feats_29903, union_geom
+
+    def _geom_bbox_str(self, geom: QgsGeometry) -> str:
+        rect = geom.boundingBox()
+        return f"{rect.xMinimum()},{rect.yMinimum()},{rect.xMaximum()},{rect.yMaximum()}"
+
+    def _rect_to_qgsrect(self, geom: QgsGeometry) -> QgsRectangle:
+        return geom.boundingBox()
+
+    # -------------------------------
+    # Geometry drawing helpers
+    # -------------------------------
+    def _plot_qgs_geometry(self, ax, geom: QgsGeometry, color="blue", linewidth=1.5,
+                           alpha=1.0, marker=None, markersize=50, label=None):
+        """Plot QGIS geometry on a Matplotlib axis."""
+        if not geom or geom.isEmpty():
+            return
 
         try:
-            if orig_crs.to_epsg() != 29903:
-                gdf_29903 = gdf.to_crs(epsg=29903)
-                self.log("Reprojected layer to EPSG:29903 (Irish Grid).")
-                return gdf_29903, True, orig_crs
-            else:
-                return gdf, False, orig_crs
-        except Exception as e:
-            self.log(f"CRS conversion to EPSG:29903 failed: {e}")
-            return gdf, False, orig_crs
+            geom_dict = json.loads(geom.asJson())
+        except Exception:
+            return
+
+        gtype = geom_dict.get("type")
+        coords = geom_dict.get("coordinates")
+
+        if not gtype or coords is None:
+            return
+
+        first = True
+
+        def add_label():
+            nonlocal first
+            if first:
+                first = False
+                return label
+            return None
+
+        if gtype == "Point":
+            x, y = coords
+            ax.scatter([x], [y], s=markersize, marker=marker or "o",
+                       color=color, alpha=alpha, label=add_label())
+        elif gtype == "MultiPoint":
+            xs = [p[0] for p in coords]
+            ys = [p[1] for p in coords]
+            ax.scatter(xs, ys, s=markersize, marker=marker or "o",
+                       color=color, alpha=alpha, label=add_label())
+        elif gtype == "LineString":
+            xs = [p[0] for p in coords]
+            ys = [p[1] for p in coords]
+            ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha, label=add_label())
+        elif gtype == "MultiLineString":
+            for line in coords:
+                xs = [p[0] for p in line]
+                ys = [p[1] for p in line]
+                ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha, label=add_label())
+        elif gtype == "Polygon":
+            # exterior
+            exterior = coords[0]
+            xs = [p[0] for p in exterior]
+            ys = [p[1] for p in exterior]
+            ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha, label=add_label())
+            # holes
+            for ring in coords[1:]:
+                xs = [p[0] for p in ring]
+                ys = [p[1] for p in ring]
+                ax.plot(xs, ys, color=color, linewidth=max(0.7, linewidth * 0.7), alpha=alpha)
+        elif gtype == "MultiPolygon":
+            for poly in coords:
+                exterior = poly[0]
+                xs = [p[0] for p in exterior]
+                ys = [p[1] for p in exterior]
+                ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha, label=add_label())
+                for ring in poly[1:]:
+                    xs = [p[0] for p in ring]
+                    ys = [p[1] for p in ring]
+                    ax.plot(xs, ys, color=color, linewidth=max(0.7, linewidth * 0.7), alpha=alpha)
+        else:
+            # fallback to bounding box if needed
+            rect = geom.boundingBox()
+            xs = [rect.xMinimum(), rect.xMaximum(), rect.xMaximum(), rect.xMinimum(), rect.xMinimum()]
+            ys = [rect.yMinimum(), rect.yMinimum(), rect.yMaximum(), rect.yMaximum(), rect.yMinimum()]
+            ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha, label=add_label())
+
+    def _point_from_geometry(self, geom: QgsGeometry):
+        if not geom or geom.isEmpty():
+            return None
+        try:
+            if QgsWkbTypes.geometryType(geom.wkbType()) == QgsWkbTypes.PointGeometry:
+                if geom.isMultipart():
+                    pts = geom.asMultiPoint()
+                    return pts[0] if pts else None
+                return geom.asPoint()
+        except Exception:
+            pass
+        return geom.centroid().asPoint()
 
     # -------------------------------
-    # NEW: auto-load selected WFS layer into QGIS if not present
+    # WFS / ArcGIS metadata
     # -------------------------------
     def _ensure_selected_api_layer_loaded(self) -> None:
         """
-        If user selected a WFS capability item (display_name in wfs_layers_info),
-        ensure it is loaded into QGIS project as a QgsVectorLayer (provider: WFS).
+        If current combo_api item is a WFS capability entry, ensure it is loaded in QGIS.
         If already loaded, do nothing.
         """
         api_name = (self.combo_api.currentText() or "").strip()
@@ -150,18 +281,17 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
         type_name = self.wfs_layers_info.get(api_name)
         if not type_name:
-            # Not a WFS capability item; likely an already-loaded layer or ArcGIS.
             return
 
-        # 1) Check if already loaded
         for lyr in QgsProject.instance().mapLayers().values():
             if isinstance(lyr, QgsVectorLayer) and lyr.providerType().upper() == "WFS":
-                src = (lyr.source() or "")
+                src = lyr.source() or ""
                 if type_name in src:
                     self.log(f"WFS layer already loaded: {lyr.name()}")
+                    if lyr not in self.api_layers:
+                        self.api_layers.append(lyr)
                     return
 
-        # 2) Load it
         uri = QgsDataSourceUri()
         uri.setParam("url", self.WFS_URL)
         uri.setParam("typename", type_name)
@@ -179,16 +309,9 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
         QgsProject.instance().addMapLayer(wfs_layer)
         self.log(f"Loaded WFS layer into QGIS: {wfs_layer.name()}")
-
-        # 3) Update local cache lists so other logic can see it without forcing a full refresh
         self.api_layers.append(wfs_layer)
 
     def on_api_selection_changed(self) -> None:
-        """
-        Slot for combo_api change:
-        - if selected item is a WFS capabilities entry, auto-load it into QGIS
-        - then update fields list
-        """
         try:
             self._ensure_selected_api_layer_loaded()
         except Exception as e:
@@ -205,18 +328,27 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         self.api_layers = []
         self.wfs_layers_info.clear()
 
-        # Collect vector layers from the current QGIS project
-        # combo_app: only local shapefile/application layers
-        # combo_api: ONLY EPA WFS layers (do not add project API layers)
+        # Local application layers + possible ArcGIS project layers
         for layer in QgsProject.instance().mapLayers().values():
-            if isinstance(layer, QgsVectorLayer):
-                provider = layer.providerType().lower()
-                name = layer.name()
-                if provider == "ogr" or name.lower().endswith(".shp"):
-                    self.combo_app.addItem(name)
-                    self.shp_layers.append(layer)
+            if not isinstance(layer, QgsVectorLayer):
+                continue
 
-        # Load EPA WFS contents for user convenience (capabilities)
+            provider = (layer.providerType() or "").lower()
+            name = layer.name() or ""
+            src = (layer.source() or "").lower()
+
+            # Application layers
+            if provider == "ogr" or name.lower().endswith(".shp"):
+                self.combo_app.addItem(name)
+                self.shp_layers.append(layer)
+
+            # ArcGIS API layers already loaded in project
+            if ("/featureserver/" in src or "/mapserver/" in src or
+                    provider in ("arcgisfeatureserver", "arcgismapserver")):
+                self.combo_api.addItem(name)
+                self.api_layers.append(layer)
+
+        # EPA WFS capabilities
         try:
             wfs = WebFeatureService(url=self.WFS_URL, version=self.WFS_VERSION)
             for layer_name, layer_obj in wfs.contents.items():
@@ -229,7 +361,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         except Exception as e:
             self.log(f"Failed to access WFS service: {e}")
 
-        # Prefill fields_list using the first shapefile (if available)
+        # fields_list prefill from first local layer
         if hasattr(self, "fields_list") and self.shp_layers:
             self.fields_list.clear()
             try:
@@ -238,7 +370,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             except Exception:
                 pass
 
-        # Re-bind signals (avoid duplicates)
+        # signal rebinding
         try:
             self.combo_api.currentIndexChanged.disconnect(self.update_fields_for_api)
         except Exception:
@@ -250,17 +382,15 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
         self.combo_api.currentIndexChanged.connect(self.on_api_selection_changed)
 
-        # Also refresh once for current selection
         try:
             self.on_api_selection_changed()
         except Exception:
             pass
 
     # -------------------------------
-    # Update fields for API (WFS + ArcGIS)
+    # Update fields for API
     # -------------------------------
     def update_fields_for_api(self) -> None:
-        """Refresh the field list based on the selected API layer (WFS or ArcGIS REST)."""
         if not hasattr(self, "fields_list"):
             return
 
@@ -269,15 +399,15 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         if not api_name:
             return
 
-        # Case 1: WFS via DescribeFeatureType
+        # WFS
         type_name = self.wfs_layers_info.get(api_name)
         if type_name:
-            # Use cached field list when available
             if type_name in self.wfs_fields_cache:
                 for f in self.wfs_fields_cache[type_name]:
                     self.fields_list.addItem(f)
                 self.log(f"Loaded {len(self.wfs_fields_cache[type_name])} WFS fields (cached).")
                 return
+
             try:
                 params = {
                     "service": "WFS",
@@ -300,15 +430,15 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                         if name_attr and type_attr and not name_attr.lower().endswith("geom"):
                             fields.append(name_attr)
 
+                self.wfs_fields_cache[type_name] = fields
                 for f in fields:
                     self.fields_list.addItem(f)
-                self.wfs_fields_cache[type_name] = fields
                 self.log(f"Loaded {len(fields)} WFS fields.")
             except Exception as e:
                 self.log(f"Failed to load WFS fields: {e}")
             return
 
-        # Case 2: ArcGIS REST (layer JSON)
+        # ArcGIS
         try:
             source_str = None
             for lyr in self.api_layers:
@@ -325,8 +455,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
             if "/FeatureServer/" in source_str or "/MapServer/" in source_str:
                 base_url = source_str.split("?")[0].rstrip("/")
-                json_url = base_url.split("/query")[0]
-                json_url = json_url.rstrip("/query") + "?f=json"
+                json_url = base_url.split("/query")[0].rstrip("/") + "?f=json"
 
                 if json_url in self.arcgis_fields_cache:
                     for f in self.arcgis_fields_cache[json_url]:
@@ -349,143 +478,333 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             self.log(f"Failed to load ArcGIS fields: {e}")
 
     # -------------------------------
-    # Pre-download data (WFS / ArcGIS)
+    # Remote download helpers
     # -------------------------------
-    def run_prestep(self, app_gdf_29903: gpd.GeoDataFrame, buffer_geom) -> None:
-        """Download API features intersecting the provided 100 km buffer around the application area."""
+    def _load_geojson_text_as_layer(self, geojson_text: str, layer_name: str) -> QgsVectorLayer:
         try:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".geojson")
+            tmp.close()
+            with open(tmp.name, "w", encoding="utf-8") as f:
+                f.write(geojson_text)
+
+            lyr = QgsVectorLayer(tmp.name, layer_name, "ogr")
+            if lyr.isValid():
+                return lyr
+            self.log("Temporary GeoJSON layer is invalid.")
+            return None
+        except Exception as e:
+            self.log(f"Failed to load temporary GeoJSON: {e}")
+            return None
+
+    def _download_wfs_layer(self, type_name: str, buffer_geom_29903: QgsGeometry) -> QgsVectorLayer:
+        try:
+            rect = buffer_geom_29903.boundingBox()
+            bbox = f"{rect.xMinimum()},{rect.yMinimum()},{rect.xMaximum()},{rect.yMaximum()},EPSG:29903"
+
+            params = {
+                "service": "WFS",
+                "version": self.WFS_VERSION,
+                "request": "GetFeature",
+                "typename": type_name,
+                "outputFormat": "application/json",
+                "srsName": "EPSG:29903",
+                "bbox": bbox,
+            }
+
+            r = self.http.get(self.WFS_URL, params=params, timeout=self.timeout_data)
+            r.raise_for_status()
+
+            lyr = self._load_geojson_text_as_layer(r.text, type_name)
+            if lyr and lyr.isValid():
+                return lyr
+            self.log("WFS GeoJSON layer invalid.")
+            return None
+        except Exception as e:
+            self.log(f"WFS download failed: {e}")
+            return None
+
+    def _download_arcgis_layer(self, source_str: str, buffer_geom_29903: QgsGeometry) -> QgsVectorLayer:
+        try:
+            source_str = source_str.strip()
+            if source_str.startswith("url="):
+                source_str = source_str.replace("url=", "").strip("'\"")
+            source_str = source_str.strip("'\"")
+
+            if not ("/FeatureServer/" in source_str or "/MapServer/" in source_str):
+                self.log("ArcGIS source is not FeatureServer/MapServer.")
+                return None
+
+            base_url = source_str.split("?")[0].rstrip("/")
+            if not base_url.endswith("/query"):
+                base_url = base_url + "/query"
+
+            rect = buffer_geom_29903.boundingBox()
+            bbox_str = f"{rect.xMinimum()},{rect.yMinimum()},{rect.xMaximum()},{rect.yMaximum()}"
+
+            params = {
+                "where": "1=1",
+                "outFields": "*",
+                "geometry": bbox_str,
+                "geometryType": "esriGeometryEnvelope",
+                "inSR": 29903,
+                "spatialRel": "esriSpatialRelIntersects",
+                "outSR": 29903,
+                "f": "geojson",
+            }
+
+            r = self.http.get(base_url, params=params, timeout=self.timeout_data)
+            r.raise_for_status()
+            lyr = self._load_geojson_text_as_layer(r.text, "arcgis_api")
+            if lyr and lyr.isValid():
+                return lyr
+            self.log("ArcGIS GeoJSON layer invalid.")
+            return None
+        except Exception as e:
+            self.log(f"ArcGIS REST download failed: {e}")
+            return None
+
+    # -------------------------------
+    # Pre-download data
+    # -------------------------------
+    def run_prestep(self, app_union_29903: QgsGeometry, buffer_geom_29903: QgsGeometry) -> None:
+        """Download API features intersecting buffer and cache as list of QgsFeature in EPSG:29903."""
+        try:
+            import time
+
             api_index = self.combo_api.currentIndex()
             if api_index < 0:
                 return
 
             api_name = self.combo_api.currentText()
-            type_name = self.wfs_layers_info.get(api_name)
             app_layer = self.shp_layers[self.combo_app.currentIndex()]
             app_uri = app_layer.dataProvider().dataSourceUri()
             cache_key = (api_name, app_uri)
+
             if cache_key in self.api_pre_filtered:
                 self.log("Using cached preprocessed data.")
                 return
 
-            minx, miny, maxx, maxy = buffer_geom.bounds
+            type_name = self.wfs_layers_info.get(api_name)
+            remote_layer = None
 
-            # Case 1: WFS GetFeature (GeoJSON)
+            # 1) 下载时间
+            t_download = time.perf_counter()
+
             if type_name:
-                try:
-                    params = {
-                        "service": "WFS",
-                        "version": self.WFS_VERSION,
-                        "request": "GetFeature",
-                        "typename": type_name,
-                        "outputFormat": "application/json",
-                        "srsName": "EPSG:29903",
-                        "bbox": f"{minx},{miny},{maxx},{maxy},EPSG:29903",
-                    }
-                    r = self.http.get(self.WFS_URL, params=params, timeout=self.timeout_data)
-                    r.raise_for_status()
-                    api_gdf = gpd.read_file(io.StringIO(r.text)).to_crs(epsg=29903)
-                    pre_gdf = api_gdf[api_gdf.geometry.intersects(buffer_geom)].reset_index(drop=True)
-                    self.api_pre_filtered[cache_key] = pre_gdf
-                    self.log(f"Found {len(pre_gdf)} WFS features within 100 km (EPSG:29903).")
-                    return
-                except Exception as e:
-                    self.log(f"WFS pre-download failed: {e}")
-                    return
+                remote_layer = self._download_wfs_layer(type_name, buffer_geom_29903)
 
-            # Case 2: ArcGIS REST query (GeoJSON)
-            source_str = None
-            for lyr in self.api_layers:
-                if lyr.name() == api_name:
-                    source_str = lyr.source()
-                    break
+            if remote_layer is None:
+                source_str = None
+                for lyr in self.api_layers:
+                    if lyr.name() == api_name:
+                        source_str = lyr.source()
+                        break
+                if source_str:
+                    remote_layer = self._download_arcgis_layer(source_str, buffer_geom_29903)
 
-            if source_str:
-                source_str = source_str.strip()
-                if source_str.startswith("url="):
-                    source_str = source_str.replace("url=", "").strip("'\"")
-                source_str = source_str.strip("'\"")
+            self.log(f"download remote layer: {time.perf_counter() - t_download:.2f}s")
 
-            if source_str and ("/FeatureServer/" in source_str or "/MapServer/" in source_str):
-                base_url = source_str.split("?")[0]
-                if not base_url.endswith("/query"):
-                    base_url = base_url.rstrip("/") + "/query"
+            if remote_layer is None or not remote_layer.isValid():
+                self.log("Unsupported API type or failed to download API data.")
+                return
 
-                bbox_str = f"{minx},{miny},{maxx},{maxy}"
+            feats = []
+            idx = QgsSpatialIndex()
+            remote_crs = remote_layer.crs() if remote_layer.crs().isValid() else self.metric_crs
 
-                params = {
-                    "where": "1=1",
-                    "outFields": "*",
-                    "geometry": bbox_str,
-                    "geometryType": "esriGeometryEnvelope",
-                    "inSR": 29903,
-                    "spatialRel": "esriSpatialRelIntersects",
-                    "outSR": 29903,
-                    "f": "geojson",
-                }
+            # 2) 遍历与处理时间
+            t_process = time.perf_counter()
 
-                try:
-                    r = self.http.get(base_url, params=params, timeout=self.timeout_data)
-                    r.raise_for_status()
-                    data = r.json()
-                    feats = data.get("features", [])
-                    if not feats:
-                        self.log("No features returned from ArcGIS API.")
-                        return
+            total_count = 0
+            kept_count = 0
 
-                    geo_list = []
-                    for feat in feats:
-                        geom = shape(feat["geometry"])
-                        props = feat.get("properties") or feat.get("attributes", {})
-                        geo_list.append({**props, "geometry": geom})
+            for f in remote_layer.getFeatures():
+                total_count += 1
 
-                    api_gdf = gpd.GeoDataFrame(geo_list, crs="EPSG:29903")
-                    pre_gdf = api_gdf[api_gdf.geometry.intersects(buffer_geom)].reset_index(drop=True)
-                    self.api_pre_filtered[cache_key] = pre_gdf
-                    self.log(f"Found {len(pre_gdf)} ArcGIS features within 100 km (EPSG:29903).")
-                    return
-                except Exception as e:
-                    self.log(f"ArcGIS REST pre-download failed: {e}")
-                    return
+                geom = f.geometry()
+                if not geom or geom.isEmpty():
+                    continue
 
-            self.log("Unsupported API type or empty data source.")
+                geom_29903 = self._transform_geometry(geom, remote_crs, self.metric_crs)
+                if geom_29903.isEmpty():
+                    continue
+
+                if not geom_29903.intersects(buffer_geom_29903):
+                    continue
+
+                new_f = QgsFeature(f)
+                new_f.setGeometry(geom_29903)
+                feats.append(new_f)
+                idx.insertFeature(new_f)
+                kept_count += 1
+
+            self.log(f"process remote features: {time.perf_counter() - t_process:.2f}s")
+            self.log(f"remote total features iterated: {total_count}")
+            self.log(f"remote kept features: {kept_count}")
+
+            self.api_pre_filtered[cache_key] = {
+                'features': feats,
+                'index': idx
+            }
+
+            self.log(f"Found {len(feats)} API features within buffer (EPSG:29903).")
+
         except Exception as e:
             self.log(f"Preprocessing failed: {e}")
             self.log(traceback.format_exc())
 
     # -------------------------------
-    # Run Analysis → CSV + Matplotlib Figure Window + Export Map
+    # Distance + direction helpers
+    # -------------------------------
+    def _azimuth_to_dir(self, deg: float) -> str:
+        dirs8 = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+        idx = int((deg + 22.5) // 45) % 8
+        return dirs8[idx]
+
+    def _azimuth_geographic(self, p1, p2) -> float:
+        dx = p2.x() - p1.x()
+        dy = p2.y() - p1.y()
+        angle_deg = math.degrees(math.atan2(dx, dy))
+        return (angle_deg + 360) % 360
+
+    def _shortest_line_endpoints(self, geom_a: QgsGeometry, geom_b: QgsGeometry):
+        """
+        Return points on geom_a and geom_b that define the shortest connecting line.
+        """
+        try:
+            line = geom_a.shortestLine(geom_b)
+            if line and not line.isEmpty():
+                if line.isMultipart():
+                    parts = line.asMultiPolyline()
+                    if parts and parts[0] and len(parts[0]) >= 2:
+                        return parts[0][0], parts[0][-1]
+                else:
+                    pts = line.asPolyline()
+                    if pts and len(pts) >= 2:
+                        return pts[0], pts[-1]
+        except Exception:
+            pass
+
+        # Fallback
+        pa = self._point_from_geometry(geom_a.nearestPoint(geom_b))
+        pb = self._point_from_geometry(geom_b.nearestPoint(geom_a))
+        return pa, pb
+
+    def _build_spatial_index_lookup(self, features):
+        idx = QgsSpatialIndex()
+        lookup = {}
+        for f in features:
+            idx.insertFeature(f)
+            lookup[f.id()] = f
+        return idx, lookup
+
+    def _find_nearest_feature_spatial_index(self, app_union_29903: QgsGeometry, pre_data: dict):
+        """
+        Optimized nearest search:
+        1) SpatialIndex nearestNeighbor by application centroid
+        2) Exact geometry distance to application geometry
+        """
+        feats = pre_data.get("features", [])
+        idx = pre_data.get("index", None)
+
+        if not feats:
+            return None, None, None, None, None
+
+        if idx is None:
+            idx, _ = self._build_spatial_index_lookup(feats)
+        feat_lookup = {f.id(): f for f in feats}
+
+        app_centroid = app_union_29903.centroid()
+        app_centroid_pt = app_centroid.asPoint()
+        app_geom = app_union_29903
+
+        # Broad candidate search
+        # 10 candidates is usually enough; fallback expands if needed.
+        candidate_ids = idx.nearestNeighbor(QgsPointXY(app_centroid_pt), 10)
+        if not candidate_ids:
+            return None, None, None, None, None
+
+        candidates = [feat_lookup[cid] for cid in candidate_ids if cid in feat_lookup]
+
+        # Expand search if all failed somehow
+        if not candidates:
+            candidate_rect = app_union_29903.buffer(30000, 8).boundingBox()
+            candidate_ids_rect = idx.intersects(candidate_rect)
+            candidates = [feat_lookup[cid] for cid in candidate_ids_rect if cid in feat_lookup]
+
+        if not candidates:
+            return None, None, None, None, None
+
+        nearest_feat = None
+        min_dist = None
+        nearest_pt_on_api = None
+        nearest_pt_on_app = None
+
+        for feat in candidates:
+            geom = feat.geometry()
+            if not geom or geom.isEmpty():
+                continue
+
+            dist = geom.distance(app_geom)
+
+            if min_dist is None or dist < min_dist:
+                p_api, p_app = self._shortest_line_endpoints(geom, app_geom)
+                min_dist = dist
+                nearest_feat = feat
+                nearest_pt_on_api = p_api
+                nearest_pt_on_app = p_app
+
+        return nearest_feat, min_dist, app_centroid_pt, nearest_pt_on_api, nearest_pt_on_app
+
+    # -------------------------------
+    # Run Analysis
     # -------------------------------
     def run_analysis(self) -> None:
-        """Export the single nearest feature to CSV, display a figure window, and export the map to PNG/PDF."""
+        """Export nearest feature to CSV, display figure window, and export map."""
         try:
             import matplotlib.pyplot as plt
             from matplotlib.patches import FancyArrowPatch
+            import time
 
             self.log("All computations use EPSG:29903 (Irish Grid).")
+
             app_index = self.combo_app.currentIndex()
             api_name = self.combo_api.currentText()
+
             if app_index < 0 or not api_name:
                 QtWidgets.QMessageBox.warning(self, "Error", "Please select both layers.")
                 return
 
-            # Read application layer once
+            # Read application layer and transform to EPSG:29903
             app_layer = self.shp_layers[app_index]
             app_uri = app_layer.dataProvider().dataSourceUri()
-            app_gdf = gpd.read_file(app_uri)
-            app_gdf_29903, _, _ = self._to_metric_gdf(app_gdf)
 
-            # Build buffer once (100 km)
-            app_union = app_gdf_29903.unary_union
-            app_centroid = app_union.centroid
-            user_buffer_geom = app_union.buffer(100000)
+            # -------------------------------
+            # Timing 1: application layer processing
+            # -------------------------------
+            t0 = time.perf_counter()
+            app_feats_29903, app_union = self._layer_geometries_in_29903(app_layer)
+            self.log(f"_layer_geometries_in_29903: {time.perf_counter() - t0:.2f}s")
 
-            # Pre-download / cache API features only when running
+            if not app_union or app_union.isEmpty():
+                QtWidgets.QMessageBox.warning(self, "Error", "Application layer has no valid geometry.")
+                return
+
+            app_centroid = app_union.centroid()
+            user_buffer_geom = app_union.buffer(30000, 8)
+
+            # -------------------------------
+            # Timing 2: pre-download / cache API features
+            # -------------------------------
             try:
                 QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
             except Exception:
                 pass
+
             try:
-                self.run_prestep(app_gdf_29903, user_buffer_geom)
+                t1 = time.perf_counter()
+                self.run_prestep(app_union, user_buffer_geom)
+                self.log(f"run_prestep: {time.perf_counter() - t1:.2f}s")
             finally:
                 try:
                     QtWidgets.QApplication.restoreOverrideCursor()
@@ -493,61 +812,46 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                     pass
 
             cache_key = (api_name, app_uri)
-            pre_gdf = self.api_pre_filtered.get(cache_key)
-            if pre_gdf is None or pre_gdf.empty:
+            pre_data = self.api_pre_filtered.get(cache_key)
+            if not pre_data or not pre_data.get("features"):
                 QtWidgets.QMessageBox.warning(self, "Error", "Preprocessed data is empty.")
                 return
 
-            result_gdf = pre_gdf[pre_gdf.geometry.intersects(user_buffer_geom)]
-            if result_gdf.empty:
-                QtWidgets.QMessageBox.information(self, "No Results", "No features found within the 100 km buffer.")
+            # -------------------------------
+            # Timing 3: exact nearest with SpatialIndex candidate narrowing
+            # -------------------------------
+            t2 = time.perf_counter()
+            nearest_feat, dist, app_centroid_pt, nearest_pt_on_api, nearest_pt_on_app = \
+                self._find_nearest_feature_spatial_index(app_union, pre_data)
+            self.log(f"_find_nearest_feature_spatial_index: {time.perf_counter() - t2:.2f}s")
+
+            if nearest_feat is None:
+                QtWidgets.QMessageBox.information(self, "No Results", "No nearest feature could be determined.")
                 return
 
-            # Angle helpers
-            def azimuth_to_dir(deg: float) -> str:
-                dirs8 = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-                idx = int((deg + 22.5) // 45) % 8
-                return dirs8[idx]
+            angle = self._azimuth_geographic(app_centroid_pt, nearest_pt_on_api)
 
-            def azimuth_geographic(p1, p2) -> float:
-                """
-                Geographic azimuth:
-                - 0° = North
-                - clockwise positive
-                - p1 = start point
-                - p2 = end point
-                """
-                dx = p2.x - p1.x
-                dy = p2.y - p1.y
-                angle_deg = math.degrees(math.atan2(dx, dy))
-                return (angle_deg + 360) % 360
+            # -------------------------------
+            # Build CSV row
+            # -------------------------------
+            selected_fields = [item.text() for item in self.fields_list.selectedItems()] if hasattr(self,
+                                                                                                    "fields_list") else []
+            nearest_fields = [field.name() for field in nearest_feat.fields()] if nearest_feat.fields() else []
 
-            # Find nearest feature by distance from API geometry to app boundary
-            dist_series = result_gdf.geometry.distance(app_union.boundary)
-            nearest_idx = dist_series.idxmin()
-            nearest_row = result_gdf.loc[[nearest_idx]].copy().reset_index(drop=True)
-
-            nearest_geom = nearest_row.geometry.iloc[0]
-
-            # IMPORTANT:
-            # start point for angle/arrow = app centroid
-            # end point for angle/arrow = nearest point on API geometry
-            nearest_pt_on_api, nearest_pt_on_app = nearest_points(nearest_geom, app_union.boundary)
-
-            dist = float(dist_series.loc[nearest_idx])
-            angle = azimuth_geographic(app_centroid, nearest_pt_on_api)
-
-            nearest_row["Distance_m"] = [dist]
-            nearest_row["Direction (°)"] = [round(angle, 2)]
-            nearest_row["Direction"] = [azimuth_to_dir(angle)]
-
-            result_gdf = nearest_row
-
-            # Determine export columns
-            selected_fields = [item.text() for item in self.fields_list.selectedItems()]
             if not selected_fields:
-                selected_fields = [c for c in result_gdf.columns if c != "geometry"]
-            export_cols = selected_fields + ["Distance_m", "Direction (°)", "Direction"]
+                selected_fields = nearest_fields
+
+            export_cols = [f for f in selected_fields if f in nearest_fields]
+            export_cols += ["Distance_m", "Direction (°)", "Direction"]
+
+            row = {}
+            for fld in selected_fields:
+                if fld in nearest_fields:
+                    row[fld] = nearest_feat[fld]
+
+            row["Distance_m"] = float(dist)
+            row["Direction (°)"] = round(angle, 2)
+            row["Direction"] = self._azimuth_to_dir(angle)
 
             # -------------------------------
             # Save CSV
@@ -568,20 +872,19 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
             try:
                 with open(output_csv, "w", encoding="utf-8-sig", newline="") as f:
-                    f.write("# Contains data from the Environmental Protection Agency (EPA), licensed under CC BY 4.0\n")
+                    f.write(
+                        "# Contains data from the Environmental Protection Agency (EPA), licensed under CC BY 4.0\n")
                     f.write("# Source: EPA API\n")
-                    result_gdf[export_cols].to_csv(
-                        f,
-                        index=False,
-                        lineterminator="\n"
-                    )
+                    writer = csv.DictWriter(f, fieldnames=export_cols, extrasaction="ignore")
+                    writer.writeheader()
+                    writer.writerow(row)
 
                 self.log(f"CSV saved: {output_csv}")
                 self.log("EPA attribution added to CSV header.")
-
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "CSV Export Error", str(e))
                 self.log(f"CSV export failed: {e}")
+                return
 
             # -------------------------------
             # Plot (Matplotlib)
@@ -589,25 +892,25 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             self.log("Opening Matplotlib Figure Window...")
 
             fig, ax = plt.subplots(figsize=(10, 10))
-            app_gdf_29903.boundary.plot(ax=ax, color="blue", linewidth=2, label="Application Area")
-            result_gdf.plot(ax=ax, color="cyan", alpha=0.6, label="Nearest Feature")
 
-            gpd.GeoDataFrame(geometry=[app_centroid], crs="EPSG:29903").plot(
-                ax=ax, color="red", marker="o", markersize=60, label="Centroid"
-            )
-            gpd.GeoDataFrame(geometry=[nearest_pt_on_app], crs="EPSG:29903").plot(
-                ax=ax, color="orange", marker="x", markersize=100, label="Nearest Point - App"
-            )
-            gpd.GeoDataFrame(geometry=[nearest_pt_on_api], crs="EPSG:29903").plot(
-                ax=ax, color="green", marker="o", markersize=100, label="Nearest Point - API"
-            )
+            # Application area
+            self._plot_qgs_geometry(ax, app_union, color="blue", linewidth=2, alpha=1.0, label="Application Area")
 
-            # Arrow:
-            # start = combo_app centroid
-            # end   = nearest point on combo_api
+            # Nearest feature
+            self._plot_qgs_geometry(ax, nearest_feat.geometry(), color="cyan", linewidth=2, alpha=0.8,
+                                    label="Nearest Feature")
+
+            # Points
+            ax.scatter([app_centroid_pt.x()], [app_centroid_pt.y()], color="red", s=60, marker="o", label="Centroid")
+            ax.scatter([nearest_pt_on_app.x()], [nearest_pt_on_app.y()], color="orange", s=100, marker="x",
+                       label="Nearest Point - App")
+            ax.scatter([nearest_pt_on_api.x()], [nearest_pt_on_api.y()], color="green", s=100, marker="o",
+                       label="Nearest Point - API")
+
+            # Arrow
             arrow = FancyArrowPatch(
-                posA=(app_centroid.x, app_centroid.y),
-                posB=(nearest_pt_on_api.x, nearest_pt_on_api.y),
+                posA=(app_centroid_pt.x(), app_centroid_pt.y()),
+                posB=(nearest_pt_on_api.x(), nearest_pt_on_api.y()),
                 arrowstyle="->",
                 mutation_scale=18,
                 linewidth=2,
@@ -620,13 +923,12 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             ax.add_patch(arrow)
 
             # Label
-            label_x = (app_centroid.x + nearest_pt_on_api.x) / 2.0
-            label_y = (app_centroid.y + nearest_pt_on_api.y) / 2.0
+            label_x = (app_centroid_pt.x() + nearest_pt_on_api.x()) / 2.0
+            label_y = (app_centroid_pt.y() + nearest_pt_on_api.y()) / 2.0
             ax.text(
                 label_x,
                 label_y,
-                f"{round(result_gdf['Distance_m'].iloc[0], 2)} m\n"
-                f"{result_gdf['Direction (°)'].iloc[0]}° ({result_gdf['Direction'].iloc[0]})",
+                f"{round(dist, 2)} m\n{round(angle, 2)}° ({self._azimuth_to_dir(angle)})",
                 fontsize=10,
                 color="darkred",
                 ha="center",
@@ -669,7 +971,10 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 if not (lower.endswith(".png") or lower.endswith(".pdf")):
                     output_map += ".png"
 
+                t3 = time.perf_counter()
                 fig.savefig(output_map, dpi=300, bbox_inches="tight")
+                self.log(f"fig.savefig: {time.perf_counter() - t3:.2f}s")
+
                 self.log(f"Map saved: {output_map}")
                 self.log(f"Map attribution added: {self.EPA_ATTRIBUTION}")
             else:
