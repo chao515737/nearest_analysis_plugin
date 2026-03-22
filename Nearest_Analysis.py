@@ -34,14 +34,12 @@ from qgis.core import (
 import time
 import os
 import csv
-import io
 import json
 import math
 import tempfile
 import traceback
 import requests
 import xml.etree.ElementTree as ET
-from pathlib import Path
 from owslib.wfs import WebFeatureService
 
 
@@ -56,6 +54,15 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
         # ---- Attribution text (EPA requirement) ----
         self.EPA_ATTRIBUTION = "Contains data from the Environmental Protection Agency (EPA), licensed under CC BY 4.0"
+
+        # Default buffer distance cache (meters)
+        self.buffer_distance_m = 30000.0
+
+        # Cache: key = (api_display_name, app_layer_uri, buffer_distance_m)
+        self.api_pre_filtered = {}
+
+        # Track last analysis inputs for auto cache invalidation
+        self.last_analysis_signature = None
 
         # Buttons
         self.run_btn.clicked.connect(self.run_analysis)
@@ -73,9 +80,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         self.wfs_layers_info = {}
         self.shp_layers = []
         self.api_layers = []
-
-        # Cache: key = (api_display_name, app_layer_uri)
-        self.api_pre_filtered = {}
 
         # Caches for field metadata
         self.wfs_fields_cache = {}      # key: type_name -> [field names]
@@ -109,6 +113,47 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
     def show_selected_fields(self) -> None:
         selected = [item.text() for item in self.fields_list.selectedItems()]
         self.log(f"Selected fields: {selected}")
+
+    # -------------------------------
+    # Buffer distance helpers
+    # -------------------------------
+    def _get_buffer_distance_m(self) -> float:
+        """
+        Read buffer distance from UI in kilometers and convert to meters.
+        Default: 30 km = 30000 m
+        """
+        default_km = 30.0
+
+        try:
+            if hasattr(self, "buffer_distance_spin"):
+                km_val = float(self.buffer_distance_spin.value())
+                if km_val > 0:
+                    return km_val * 1000.0
+        except Exception as e:
+            self.log(f"Failed to read buffer distance from UI: {e}")
+
+        return default_km * 1000.0
+
+    def _make_analysis_signature(self, api_name: str, app_uri: str, buffer_distance_m: float):
+        """
+        Signature for determining whether cached preprocessed data is still valid.
+        """
+        return (api_name, app_uri, round(buffer_distance_m, 3))
+
+    def _invalidate_cache_if_needed(self, api_name: str, app_uri: str, buffer_distance_m: float) -> None:
+        """
+        Automatically clear cached preprocessing results if app layer / API / buffer distance changed.
+        """
+        new_signature = self._make_analysis_signature(api_name, app_uri, buffer_distance_m)
+
+        if self.last_analysis_signature is None:
+            self.last_analysis_signature = new_signature
+            return
+
+        if new_signature != self.last_analysis_signature:
+            self.log("Analysis inputs changed. Clearing cached preprocessed data.")
+            self.api_pre_filtered.clear()
+            self.last_analysis_signature = new_signature
 
     # -------------------------------
     # CRS / geometry helpers
@@ -227,12 +272,10 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 ys = [p[1] for p in line]
                 ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha, label=add_label())
         elif gtype == "Polygon":
-            # exterior
             exterior = coords[0]
             xs = [p[0] for p in exterior]
             ys = [p[1] for p in exterior]
             ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha, label=add_label())
-            # holes
             for ring in coords[1:]:
                 xs = [p[0] for p in ring]
                 ys = [p[1] for p in ring]
@@ -248,7 +291,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                     ys = [p[1] for p in ring]
                     ax.plot(xs, ys, color=color, linewidth=max(0.7, linewidth * 0.7), alpha=alpha)
         else:
-            # fallback to bounding box if needed
             rect = geom.boundingBox()
             xs = [rect.xMinimum(), rect.xMaximum(), rect.xMaximum(), rect.xMinimum(), rect.xMinimum()]
             ys = [rect.yMinimum(), rect.yMinimum(), rect.yMaximum(), rect.yMaximum(), rect.yMinimum()]
@@ -328,7 +370,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         self.api_layers = []
         self.wfs_layers_info.clear()
 
-        # Local application layers + possible ArcGIS project layers
         for layer in QgsProject.instance().mapLayers().values():
             if not isinstance(layer, QgsVectorLayer):
                 continue
@@ -337,18 +378,15 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             name = layer.name() or ""
             src = (layer.source() or "").lower()
 
-            # Application layers
             if provider == "ogr" or name.lower().endswith(".shp"):
                 self.combo_app.addItem(name)
                 self.shp_layers.append(layer)
 
-            # ArcGIS API layers already loaded in project
             if ("/featureserver/" in src or "/mapserver/" in src or
                     provider in ("arcgisfeatureserver", "arcgismapserver")):
                 self.combo_api.addItem(name)
                 self.api_layers.append(layer)
 
-        # EPA WFS capabilities
         try:
             wfs = WebFeatureService(url=self.WFS_URL, version=self.WFS_VERSION)
             for layer_name, layer_obj in wfs.contents.items():
@@ -361,7 +399,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         except Exception as e:
             self.log(f"Failed to access WFS service: {e}")
 
-        # fields_list prefill from first local layer
         if hasattr(self, "fields_list") and self.shp_layers:
             self.fields_list.clear()
             try:
@@ -370,7 +407,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             except Exception:
                 pass
 
-        # signal rebinding
         try:
             self.combo_api.currentIndexChanged.disconnect(self.update_fields_for_api)
         except Exception:
@@ -399,7 +435,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         if not api_name:
             return
 
-        # WFS
         type_name = self.wfs_layers_info.get(api_name)
         if type_name:
             if type_name in self.wfs_fields_cache:
@@ -438,7 +473,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 self.log(f"Failed to load WFS fields: {e}")
             return
 
-        # ArcGIS
         try:
             source_str = None
             for lyr in self.api_layers:
@@ -569,8 +603,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
     def run_prestep(self, app_union_29903: QgsGeometry, buffer_geom_29903: QgsGeometry) -> None:
         """Download API features intersecting buffer and cache as list of QgsFeature in EPSG:29903."""
         try:
-            import time
-
             api_index = self.combo_api.currentIndex()
             if api_index < 0:
                 return
@@ -578,7 +610,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             api_name = self.combo_api.currentText()
             app_layer = self.shp_layers[self.combo_app.currentIndex()]
             app_uri = app_layer.dataProvider().dataSourceUri()
-            cache_key = (api_name, app_uri)
+            cache_key = self._make_analysis_signature(api_name, app_uri, self.buffer_distance_m)
 
             if cache_key in self.api_pre_filtered:
                 self.log("Using cached preprocessed data.")
@@ -587,7 +619,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             type_name = self.wfs_layers_info.get(api_name)
             remote_layer = None
 
-            # 1) 下载时间
             t_download = time.perf_counter()
 
             if type_name:
@@ -612,7 +643,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             idx = QgsSpatialIndex()
             remote_crs = remote_layer.crs() if remote_layer.crs().isValid() else self.metric_crs
 
-            # 2) 遍历与处理时间
             t_process = time.perf_counter()
 
             total_count = 0
@@ -643,8 +673,8 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             self.log(f"remote kept features: {kept_count}")
 
             self.api_pre_filtered[cache_key] = {
-                'features': feats,
-                'index': idx
+                "features": feats,
+                "index": idx
             }
 
             self.log(f"Found {len(feats)} API features within buffer (EPSG:29903).")
@@ -685,7 +715,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         except Exception:
             pass
 
-        # Fallback
         pa = self._point_from_geometry(geom_a.nearestPoint(geom_b))
         pb = self._point_from_geometry(geom_b.nearestPoint(geom_a))
         return pa, pb
@@ -718,17 +747,14 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         app_centroid_pt = app_centroid.asPoint()
         app_geom = app_union_29903
 
-        # Broad candidate search
-        # 10 candidates is usually enough; fallback expands if needed.
         candidate_ids = idx.nearestNeighbor(QgsPointXY(app_centroid_pt), 10)
         if not candidate_ids:
             return None, None, None, None, None
 
         candidates = [feat_lookup[cid] for cid in candidate_ids if cid in feat_lookup]
 
-        # Expand search if all failed somehow
         if not candidates:
-            candidate_rect = app_union_29903.buffer(30000, 8).boundingBox()
+            candidate_rect = app_union_29903.buffer(self.buffer_distance_m, 8).boundingBox()
             candidate_ids_rect = idx.intersects(candidate_rect)
             candidates = [feat_lookup[cid] for cid in candidate_ids_rect if cid in feat_lookup]
 
@@ -764,7 +790,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         try:
             import matplotlib.pyplot as plt
             from matplotlib.patches import FancyArrowPatch
-            import time
 
             self.log("All computations use EPSG:29903 (Irish Grid).")
 
@@ -775,13 +800,9 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.warning(self, "Error", "Please select both layers.")
                 return
 
-            # Read application layer and transform to EPSG:29903
             app_layer = self.shp_layers[app_index]
             app_uri = app_layer.dataProvider().dataSourceUri()
 
-            # -------------------------------
-            # Timing 1: application layer processing
-            # -------------------------------
             t0 = time.perf_counter()
             app_feats_29903, app_union = self._layer_geometries_in_29903(app_layer)
             self.log(f"_layer_geometries_in_29903: {time.perf_counter() - t0:.2f}s")
@@ -791,11 +812,17 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 return
 
             app_centroid = app_union.centroid()
-            user_buffer_geom = app_union.buffer(30000, 8)
 
-            # -------------------------------
-            # Timing 2: pre-download / cache API features
-            # -------------------------------
+            self.buffer_distance_m = self._get_buffer_distance_m()
+            self.log(
+                f"Using buffer distance: {self.buffer_distance_m / 1000.0:.2f} km "
+                f"({self.buffer_distance_m:.0f} m)"
+            )
+
+            self._invalidate_cache_if_needed(api_name, app_uri, self.buffer_distance_m)
+
+            user_buffer_geom = app_union.buffer(self.buffer_distance_m, 8)
+
             try:
                 QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
             except Exception:
@@ -811,15 +838,12 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 except Exception:
                     pass
 
-            cache_key = (api_name, app_uri)
+            cache_key = self._make_analysis_signature(api_name, app_uri, self.buffer_distance_m)
             pre_data = self.api_pre_filtered.get(cache_key)
             if not pre_data or not pre_data.get("features"):
                 QtWidgets.QMessageBox.warning(self, "Error", "Preprocessed data is empty.")
                 return
 
-            # -------------------------------
-            # Timing 3: exact nearest with SpatialIndex candidate narrowing
-            # -------------------------------
             t2 = time.perf_counter()
             nearest_feat, dist, app_centroid_pt, nearest_pt_on_api, nearest_pt_on_app = \
                 self._find_nearest_feature_spatial_index(app_union, pre_data)
@@ -831,11 +855,9 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
             angle = self._azimuth_geographic(app_centroid_pt, nearest_pt_on_api)
 
-            # -------------------------------
-            # Build CSV row
-            # -------------------------------
-            selected_fields = [item.text() for item in self.fields_list.selectedItems()] if hasattr(self,
-                                                                                                    "fields_list") else []
+            selected_fields = [item.text() for item in self.fields_list.selectedItems()] if hasattr(
+                self, "fields_list"
+            ) else []
             nearest_fields = [field.name() for field in nearest_feat.fields()] if nearest_feat.fields() else []
 
             if not selected_fields:
@@ -853,9 +875,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             row["Direction (°)"] = round(angle, 2)
             row["Direction"] = self._azimuth_to_dir(angle)
 
-            # -------------------------------
-            # Save CSV
-            # -------------------------------
             output_csv, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
                 "Save CSV",
@@ -872,8 +891,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
             try:
                 with open(output_csv, "w", encoding="utf-8-sig", newline="") as f:
-                    f.write(
-                        "# Contains data from the Environmental Protection Agency (EPA), licensed under CC BY 4.0\n")
+                    f.write("# Contains data from the Environmental Protection Agency (EPA), licensed under CC BY 4.0\n")
                     f.write("# Source: EPA API\n")
                     writer = csv.DictWriter(f, fieldnames=export_cols, extrasaction="ignore")
                     writer.writeheader()
@@ -886,28 +904,20 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 self.log(f"CSV export failed: {e}")
                 return
 
-            # -------------------------------
-            # Plot (Matplotlib)
-            # -------------------------------
             self.log("Opening Matplotlib Figure Window...")
 
             fig, ax = plt.subplots(figsize=(10, 10))
 
-            # Application area
             self._plot_qgs_geometry(ax, app_union, color="blue", linewidth=2, alpha=1.0, label="Application Area")
-
-            # Nearest feature
             self._plot_qgs_geometry(ax, nearest_feat.geometry(), color="cyan", linewidth=2, alpha=0.8,
                                     label="Nearest Feature")
 
-            # Points
             ax.scatter([app_centroid_pt.x()], [app_centroid_pt.y()], color="red", s=60, marker="o", label="Centroid")
             ax.scatter([nearest_pt_on_app.x()], [nearest_pt_on_app.y()], color="orange", s=100, marker="x",
                        label="Nearest Point - App")
             ax.scatter([nearest_pt_on_api.x()], [nearest_pt_on_api.y()], color="green", s=100, marker="o",
                        label="Nearest Point - API")
 
-            # Arrow
             arrow = FancyArrowPatch(
                 posA=(app_centroid_pt.x(), app_centroid_pt.y()),
                 posB=(nearest_pt_on_api.x(), nearest_pt_on_api.y()),
@@ -922,7 +932,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             )
             ax.add_patch(arrow)
 
-            # Label
             label_x = (app_centroid_pt.x() + nearest_pt_on_api.x()) / 2.0
             label_y = (app_centroid_pt.y() + nearest_pt_on_api.y()) / 2.0
             ax.text(
@@ -956,9 +965,6 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             fig.tight_layout()
             fig.subplots_adjust(bottom=0.06)
 
-            # -------------------------------
-            # Export Map (PNG/PDF)
-            # -------------------------------
             output_map, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
                 "Save Map (PNG/PDF)",
