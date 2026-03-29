@@ -11,7 +11,7 @@ class NearestAnalysisPlugin:
     def __init__(self, iface):
         """Initialize the plugin"""
         self.iface = iface
-        self.plugin_name = "Nearest Analysis"
+        self.plugin_name = "Ireland Nearest Analysis"
         self.dialog = None
         self.action = None
 
