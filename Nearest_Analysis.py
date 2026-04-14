@@ -12,6 +12,10 @@ Native QGIS version:
 - Uses QgsGeometry / QgsSpatialIndex / QgsCoordinateTransform
 - Keeps EPSG:29903 workflow
 - Keeps CSV export + Matplotlib figure export
+
+Modified:
+- When API layer is polygonal and Application Area is inside / overlapping the API polygon,
+  Direction is set to "Inside" and Direction (°) is left blank.
 """
 
 from PyQt5 import QtWidgets, uic
@@ -308,6 +312,40 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         except Exception:
             pass
         return geom.centroid().asPoint()
+
+    def _is_polygon_geometry(self, geom: QgsGeometry) -> bool:
+        try:
+            return QgsWkbTypes.geometryType(geom.wkbType()) == QgsWkbTypes.PolygonGeometry
+        except Exception:
+            return False
+
+    def _should_mark_inside(self, app_geom: QgsGeometry, api_geom: QgsGeometry, dist: float) -> bool:
+        """
+        For polygon API features, if Application Area is inside / overlapping / intersecting
+        and distance == 0, mark direction as Inside.
+        """
+        try:
+            if api_geom is None or api_geom.isEmpty() or app_geom is None or app_geom.isEmpty():
+                return False
+
+            if dist is None or abs(float(dist)) > 1e-9:
+                return False
+
+            if not self._is_polygon_geometry(api_geom):
+                return False
+
+            if api_geom.contains(app_geom):
+                return True
+            if api_geom.intersects(app_geom):
+                return True
+            if api_geom.overlaps(app_geom):
+                return True
+            if api_geom.touches(app_geom):
+                return True
+        except Exception:
+            return False
+
+        return False
 
     # -------------------------------
     # WFS / ArcGIS metadata
@@ -853,7 +891,17 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.information(self, "No Results", "No nearest feature could be determined.")
                 return
 
-            angle = self._azimuth_geographic(app_centroid_pt, nearest_pt_on_api)
+            nearest_geom = nearest_feat.geometry()
+            is_inside_case = self._should_mark_inside(app_union, nearest_geom, dist)
+
+            angle = None
+            direction = None
+            if is_inside_case:
+                direction = "Inside"
+                self.log("Application Area is inside / overlapping polygon API feature. Direction set to 'Inside'.")
+            else:
+                angle = self._azimuth_geographic(app_centroid_pt, nearest_pt_on_api)
+                direction = self._azimuth_to_dir(angle)
 
             selected_fields = [item.text() for item in self.fields_list.selectedItems()] if hasattr(
                 self, "fields_list"
@@ -872,8 +920,8 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                     row[fld] = nearest_feat[fld]
 
             row["Distance_m"] = float(dist)
-            row["Direction (°)"] = round(angle, 2)
-            row["Direction"] = self._azimuth_to_dir(angle)
+            row["Direction (°)"] = "" if angle is None else round(angle, 2)
+            row["Direction"] = direction if direction is not None else ""
 
             output_csv, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self,
@@ -918,26 +966,33 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             ax.scatter([nearest_pt_on_api.x()], [nearest_pt_on_api.y()], color="green", s=100, marker="o",
                        label="Nearest Point - API")
 
-            arrow = FancyArrowPatch(
-                posA=(app_centroid_pt.x(), app_centroid_pt.y()),
-                posB=(nearest_pt_on_api.x(), nearest_pt_on_api.y()),
-                arrowstyle="->",
-                mutation_scale=18,
-                linewidth=2,
-                color="red",
-                transform=ax.transData,
-                shrinkA=0,
-                shrinkB=0,
-                zorder=5,
-            )
-            ax.add_patch(arrow)
+            if not is_inside_case:
+                arrow = FancyArrowPatch(
+                    posA=(app_centroid_pt.x(), app_centroid_pt.y()),
+                    posB=(nearest_pt_on_api.x(), nearest_pt_on_api.y()),
+                    arrowstyle="->",
+                    mutation_scale=18,
+                    linewidth=2,
+                    color="red",
+                    transform=ax.transData,
+                    shrinkA=0,
+                    shrinkB=0,
+                    zorder=5,
+                )
+                ax.add_patch(arrow)
 
-            label_x = (app_centroid_pt.x() + nearest_pt_on_api.x()) / 2.0
-            label_y = (app_centroid_pt.y() + nearest_pt_on_api.y()) / 2.0
+                label_x = (app_centroid_pt.x() + nearest_pt_on_api.x()) / 2.0
+                label_y = (app_centroid_pt.y() + nearest_pt_on_api.y()) / 2.0
+                label_text = f"{round(dist, 2)} m\n{round(angle, 2)}° ({direction})"
+            else:
+                label_x = app_centroid_pt.x()
+                label_y = app_centroid_pt.y()
+                label_text = f"{round(dist, 2)} m\nInside"
+
             ax.text(
                 label_x,
                 label_y,
-                f"{round(dist, 2)} m\n{round(angle, 2)}° ({self._azimuth_to_dir(angle)})",
+                label_text,
                 fontsize=10,
                 color="darkred",
                 ha="center",
