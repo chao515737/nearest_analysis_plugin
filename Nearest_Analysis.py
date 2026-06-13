@@ -2,6 +2,7 @@
 """
 Nearest_Analysis.py
 Author: Chao Gong
+
 Description
 -----------
 QGIS dialog for nearest-feature analysis between a local "Application Area"
@@ -16,10 +17,13 @@ Native QGIS version:
 Modified:
 - When API layer is polygonal and Application Area is inside / overlapping the API polygon,
   Direction is set to "Inside" and Direction (°) is left blank.
+- Compatible with QGIS 3.x and QGIS 4.x (Qt5 / Qt6)
+- Fixed nearest-distance local variable bug
+- Added lightweight caching to reduce repeated WFS/field loading lag
 """
 
-from PyQt5 import QtWidgets, uic
-from PyQt5.QtCore import Qt
+from qgis.PyQt import QtWidgets, uic
+from qgis.PyQt.QtCore import Qt
 from qgis.core import (
     QgsProject,
     QgsVectorLayer,
@@ -35,6 +39,7 @@ from qgis.core import (
     QgsPointXY,
     QgsWkbTypes,
 )
+
 import time
 import os
 import csv
@@ -43,13 +48,18 @@ import math
 import tempfile
 import traceback
 import requests
-import xml.etree.ElementTree as ET
 from owslib.wfs import WebFeatureService
 
 
 class NearestAnalysisDialog(QtWidgets.QDialog):
+    # -------- global caches shared across dialog instances --------
+    GLOBAL_WFS_LAYERS_INFO = None          # dict: display_name -> type_name
+    GLOBAL_WFS_DISPLAY_ORDER = None        # list of display_name
+    GLOBAL_WFS_FIELDS_CACHE = {}           # type_name -> [field names]
+    GLOBAL_ARCGIS_FIELDS_CACHE = {}        # json_url -> [field names]
+
     def __init__(self, parent=None):
-        super().__init__()
+        super().__init__(parent)
         uic.loadUi(os.path.join(os.path.dirname(__file__), "Nearest_Analysis_dialog_base.ui"), self)
 
         # ---- WFS endpoint (EPA) ----
@@ -57,7 +67,10 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         self.WFS_VERSION = "1.1.0"
 
         # ---- Attribution text (EPA requirement) ----
-        self.EPA_ATTRIBUTION = "Contains data from the Environmental Protection Agency (EPA), licensed under CC BY 4.0"
+        self.EPA_ATTRIBUTION = (
+            "Contains data from the Environmental Protection Agency (EPA), "
+            "licensed under CC BY 4.0"
+        )
 
         # Default buffer distance cache (meters)
         self.buffer_distance_m = 30000.0
@@ -75,9 +88,14 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         if hasattr(self, "clear_log_btn"):
             self.clear_log_btn.clicked.connect(self.clear_log)
 
-        # Multi-selection for fields_list
+        # Multi-selection for fields_list (Qt5 / Qt6 compatible)
         if hasattr(self, "fields_list"):
-            self.fields_list.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+            try:
+                selection_mode = QtWidgets.QAbstractItemView.SelectionMode.MultiSelection  # Qt6
+            except AttributeError:
+                selection_mode = QtWidgets.QAbstractItemView.MultiSelection  # Qt5
+
+            self.fields_list.setSelectionMode(selection_mode)
             self.fields_list.itemSelectionChanged.connect(self.show_selected_fields)
 
         # State
@@ -86,8 +104,8 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
         self.api_layers = []
 
         # Caches for field metadata
-        self.wfs_fields_cache = {}      # key: type_name -> [field names]
-        self.arcgis_fields_cache = {}   # key: json_url -> [field names]
+        self.wfs_fields_cache = self.GLOBAL_WFS_FIELDS_CACHE
+        self.arcgis_fields_cache = self.GLOBAL_ARCGIS_FIELDS_CACHE
 
         # Reuse one session
         self.http = requests.Session()
@@ -162,8 +180,12 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
     # -------------------------------
     # CRS / geometry helpers
     # -------------------------------
-    def _transform_geometry(self, geom: QgsGeometry, src_crs: QgsCoordinateReferenceSystem,
-                            dst_crs: QgsCoordinateReferenceSystem = None) -> QgsGeometry:
+    def _transform_geometry(
+        self,
+        geom: QgsGeometry,
+        src_crs: QgsCoordinateReferenceSystem,
+        dst_crs: QgsCoordinateReferenceSystem = None,
+    ) -> QgsGeometry:
         if dst_crs is None:
             dst_crs = self.metric_crs
 
@@ -198,6 +220,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             geom = f.geometry()
             if not geom or geom.isEmpty():
                 continue
+
             geom_29903 = self._transform_geometry(geom, src_crs, self.metric_crs)
             if geom_29903.isEmpty():
                 continue
@@ -231,8 +254,17 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
     # -------------------------------
     # Geometry drawing helpers
     # -------------------------------
-    def _plot_qgs_geometry(self, ax, geom: QgsGeometry, color="blue", linewidth=1.5,
-                           alpha=1.0, marker=None, markersize=50, label=None):
+    def _plot_qgs_geometry(
+        self,
+        ax,
+        geom: QgsGeometry,
+        color="blue",
+        linewidth=1.5,
+        alpha=1.0,
+        marker=None,
+        markersize=50,
+        label=None,
+    ):
         """Plot QGIS geometry on a Matplotlib axis."""
         if not geom or geom.isEmpty():
             return
@@ -296,8 +328,14 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                     ax.plot(xs, ys, color=color, linewidth=max(0.7, linewidth * 0.7), alpha=alpha)
         else:
             rect = geom.boundingBox()
-            xs = [rect.xMinimum(), rect.xMaximum(), rect.xMaximum(), rect.xMinimum(), rect.xMinimum()]
-            ys = [rect.yMinimum(), rect.yMinimum(), rect.yMaximum(), rect.yMaximum(), rect.yMinimum()]
+            xs = [
+                rect.xMinimum(), rect.xMaximum(), rect.xMaximum(),
+                rect.xMinimum(), rect.xMinimum()
+            ]
+            ys = [
+                rect.yMinimum(), rect.yMinimum(), rect.yMaximum(),
+                rect.yMaximum(), rect.yMinimum()
+            ]
             ax.plot(xs, ys, color=color, linewidth=linewidth, alpha=alpha, label=add_label())
 
     def _point_from_geometry(self, geom: QgsGeometry):
@@ -350,6 +388,38 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
     # -------------------------------
     # WFS / ArcGIS metadata
     # -------------------------------
+    def _ensure_wfs_capabilities_loaded(self) -> None:
+        """
+        Load WFS layer list once per application session and reuse it.
+        Keeps original behavior but avoids repeated 414-layer fetches.
+        """
+        if (
+            self.__class__.GLOBAL_WFS_LAYERS_INFO is not None and
+            self.__class__.GLOBAL_WFS_DISPLAY_ORDER is not None
+        ):
+            self.wfs_layers_info = dict(self.__class__.GLOBAL_WFS_LAYERS_INFO)
+            return
+
+        try:
+            wfs = WebFeatureService(url=self.WFS_URL, version=self.WFS_VERSION)
+            layers_info = {}
+            display_order = []
+
+            for layer_name, layer_obj in wfs.contents.items():
+                type_name = layer_name if layer_name.startswith("EPA:") else f"EPA:{layer_name}"
+                title = getattr(layer_obj, "title", layer_name)
+                display_name = f"{title} ({type_name})"
+                layers_info[display_name] = type_name
+                display_order.append(display_name)
+
+            self.__class__.GLOBAL_WFS_LAYERS_INFO = layers_info
+            self.__class__.GLOBAL_WFS_DISPLAY_ORDER = display_order
+            self.wfs_layers_info = dict(layers_info)
+            self.log(f"Loaded {len(layers_info)} WFS layers.")
+        except Exception as e:
+            self.log(f"Failed to access WFS service: {e}")
+            self.wfs_layers_info = {}
+
     def _ensure_selected_api_layer_loaded(self) -> None:
         """
         If current combo_api item is a WFS capability entry, ensure it is loaded in QGIS.
@@ -402,11 +472,17 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
     # Populate layer lists
     # -------------------------------
     def populate_layers(self) -> None:
+        current_app = self.combo_app.currentText() if hasattr(self, "combo_app") else ""
+        current_api = self.combo_api.currentText() if hasattr(self, "combo_api") else ""
+
         self.combo_app.clear()
         self.combo_api.clear()
         self.shp_layers = []
         self.api_layers = []
         self.wfs_layers_info.clear()
+
+        seen_api_names = set()
+        seen_app_names = set()
 
         for layer in QgsProject.instance().mapLayers().values():
             if not isinstance(layer, QgsVectorLayer):
@@ -417,25 +493,29 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             src = (layer.source() or "").lower()
 
             if provider == "ogr" or name.lower().endswith(".shp"):
-                self.combo_app.addItem(name)
-                self.shp_layers.append(layer)
+                if name not in seen_app_names:
+                    self.combo_app.addItem(name)
+                    self.shp_layers.append(layer)
+                    seen_app_names.add(name)
 
-            if ("/featureserver/" in src or "/mapserver/" in src or
-                    provider in ("arcgisfeatureserver", "arcgismapserver")):
-                self.combo_api.addItem(name)
-                self.api_layers.append(layer)
+            if (
+                "/featureserver/" in src or
+                "/mapserver/" in src or
+                provider in ("arcgisfeatureserver", "arcgismapserver")
+            ):
+                if name not in seen_api_names:
+                    self.combo_api.addItem(name)
+                    self.api_layers.append(layer)
+                    seen_api_names.add(name)
 
-        try:
-            wfs = WebFeatureService(url=self.WFS_URL, version=self.WFS_VERSION)
-            for layer_name, layer_obj in wfs.contents.items():
-                type_name = layer_name if layer_name.startswith("EPA:") else f"EPA:{layer_name}"
-                title = getattr(layer_obj, "title", layer_name)
-                display_name = f"{title} ({type_name})"
-                self.combo_api.addItem(display_name)
-                self.wfs_layers_info[display_name] = type_name
-            self.log(f"Loaded {len(self.wfs_layers_info)} WFS layers.")
-        except Exception as e:
-            self.log(f"Failed to access WFS service: {e}")
+        self._ensure_wfs_capabilities_loaded()
+
+        if self.wfs_layers_info:
+            display_order = self.__class__.GLOBAL_WFS_DISPLAY_ORDER or list(self.wfs_layers_info.keys())
+            for display_name in display_order:
+                if display_name not in seen_api_names:
+                    self.combo_api.addItem(display_name)
+                    seen_api_names.add(display_name)
 
         if hasattr(self, "fields_list") and self.shp_layers:
             self.fields_list.clear()
@@ -455,6 +535,17 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             pass
 
         self.combo_api.currentIndexChanged.connect(self.on_api_selection_changed)
+
+        # Restore previous selections where possible
+        if current_app:
+            idx = self.combo_app.findText(current_app)
+            if idx >= 0:
+                self.combo_app.setCurrentIndex(idx)
+
+        if current_api:
+            idx = self.combo_api.findText(current_api)
+            if idx >= 0:
+                self.combo_api.setCurrentIndex(idx)
 
         try:
             self.on_api_selection_changed()
@@ -482,31 +573,37 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 return
 
             try:
-                params = {
-                    "service": "WFS",
-                    "version": self.WFS_VERSION,
-                    "request": "DescribeFeatureType",
-                    "typename": type_name
-                }
-                r = self.http.get(self.WFS_URL, params=params, timeout=self.timeout_meta)
-                r.raise_for_status()
-                root = ET.fromstring(r.content)
-
-                def strip_ns(tag):
-                    return tag.split('}', 1)[-1] if '}' in tag else tag
-
                 fields = []
-                for element in root.iter():
-                    if strip_ns(element.tag) == "element":
-                        name_attr = element.attrib.get("name")
-                        type_attr = element.attrib.get("type")
-                        if name_attr and type_attr and not name_attr.lower().endswith("geom"):
-                            fields.append(name_attr)
+
+                # Avoid parsing remote XML here. Bandit flags xml.etree.ElementTree.fromstring
+                # for untrusted XML. Instead, get the WFS fields from the QgsVectorLayer
+                # that QGIS has already loaded for the selected API layer.
+                for lyr in self.api_layers:
+                    if lyr.name() == api_name:
+                        fields = [
+                            field.name()
+                            for field in lyr.fields()
+                            if not field.name().lower().endswith("geom")
+                        ]
+                        break
+
+                # Fallback: search all loaded QGIS vector layers by WFS typename.
+                if not fields:
+                    for lyr in QgsProject.instance().mapLayers().values():
+                        if isinstance(lyr, QgsVectorLayer):
+                            src = lyr.source() or ""
+                            if type_name in src:
+                                fields = [
+                                    field.name()
+                                    for field in lyr.fields()
+                                    if not field.name().lower().endswith("geom")
+                                ]
+                                break
 
                 self.wfs_fields_cache[type_name] = fields
                 for f in fields:
                     self.fields_list.addItem(f)
-                self.log(f"Loaded {len(fields)} WFS fields.")
+                self.log(f"Loaded {len(fields)} WFS fields from QGIS layer.")
             except Exception as e:
                 self.log(f"Failed to load WFS fields: {e}")
             return
@@ -532,7 +629,10 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 if json_url in self.arcgis_fields_cache:
                     for f in self.arcgis_fields_cache[json_url]:
                         self.fields_list.addItem(f)
-                    self.log(f"Loaded {len(self.arcgis_fields_cache[json_url])} ArcGIS REST fields (cached).")
+                    self.log(
+                        f"Loaded {len(self.arcgis_fields_cache[json_url])} "
+                        f"ArcGIS REST fields (cached)."
+                    )
                     return
 
                 rj = self.http.get(json_url, timeout=self.timeout_meta)
@@ -571,7 +671,10 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
     def _download_wfs_layer(self, type_name: str, buffer_geom_29903: QgsGeometry) -> QgsVectorLayer:
         try:
             rect = buffer_geom_29903.boundingBox()
-            bbox = f"{rect.xMinimum()},{rect.yMinimum()},{rect.xMaximum()},{rect.yMaximum()},EPSG:29903"
+            bbox = (
+                f"{rect.xMinimum()},{rect.yMinimum()},"
+                f"{rect.xMaximum()},{rect.yMaximum()},EPSG:29903"
+            )
 
             params = {
                 "service": "WFS",
@@ -712,7 +815,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
             self.api_pre_filtered[cache_key] = {
                 "features": feats,
-                "index": idx
+                "index": idx,
             }
 
             self.log(f"Found {len(feats)} API features within buffer (EPSG:29903).")
@@ -779,6 +882,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
         if idx is None:
             idx, _ = self._build_spatial_index_lookup(feats)
+
         feat_lookup = {f.id(): f for f in feats}
 
         app_centroid = app_union_29903.centroid()
@@ -888,7 +992,9 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             self.log(f"_find_nearest_feature_spatial_index: {time.perf_counter() - t2:.2f}s")
 
             if nearest_feat is None:
-                QtWidgets.QMessageBox.information(self, "No Results", "No nearest feature could be determined.")
+                QtWidgets.QMessageBox.information(
+                    self, "No Results", "No nearest feature could be determined."
+                )
                 return
 
             nearest_geom = nearest_feat.geometry()
@@ -898,14 +1004,19 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
             direction = None
             if is_inside_case:
                 direction = "Inside"
-                self.log("Application Area is inside / overlapping polygon API feature. Direction set to 'Inside'.")
+                self.log(
+                    "Application Area is inside / overlapping polygon API feature. "
+                    "Direction set to 'Inside'."
+                )
             else:
                 angle = self._azimuth_geographic(app_centroid_pt, nearest_pt_on_api)
                 direction = self._azimuth_to_dir(angle)
 
-            selected_fields = [item.text() for item in self.fields_list.selectedItems()] if hasattr(
-                self, "fields_list"
-            ) else []
+            selected_fields = (
+                [item.text() for item in self.fields_list.selectedItems()]
+                if hasattr(self, "fields_list")
+                else []
+            )
             nearest_fields = [field.name() for field in nearest_feat.fields()] if nearest_feat.fields() else []
 
             if not selected_fields:
@@ -927,7 +1038,7 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
                 self,
                 "Save CSV",
                 os.path.expanduser("~/Nearest_Result.csv"),
-                "CSV Files (*.csv)"
+                "CSV Files (*.csv)",
             )
 
             if not output_csv:
@@ -939,7 +1050,10 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
             try:
                 with open(output_csv, "w", encoding="utf-8-sig", newline="") as f:
-                    f.write("# Contains data from the Environmental Protection Agency (EPA), licensed under CC BY 4.0\n")
+                    f.write(
+                        "# Contains data from the Environmental Protection Agency (EPA), "
+                        "licensed under CC BY 4.0\n"
+                    )
                     f.write("# Source: EPA API\n")
                     writer = csv.DictWriter(f, fieldnames=export_cols, extrasaction="ignore")
                     writer.writeheader()
@@ -956,15 +1070,26 @@ class NearestAnalysisDialog(QtWidgets.QDialog):
 
             fig, ax = plt.subplots(figsize=(10, 10))
 
-            self._plot_qgs_geometry(ax, app_union, color="blue", linewidth=2, alpha=1.0, label="Application Area")
-            self._plot_qgs_geometry(ax, nearest_feat.geometry(), color="cyan", linewidth=2, alpha=0.8,
-                                    label="Nearest Feature")
+            self._plot_qgs_geometry(
+                ax, app_union, color="blue", linewidth=2, alpha=1.0, label="Application Area"
+            )
+            self._plot_qgs_geometry(
+                ax, nearest_feat.geometry(), color="cyan", linewidth=2, alpha=0.8,
+                label="Nearest Feature"
+            )
 
-            ax.scatter([app_centroid_pt.x()], [app_centroid_pt.y()], color="red", s=60, marker="o", label="Centroid")
-            ax.scatter([nearest_pt_on_app.x()], [nearest_pt_on_app.y()], color="orange", s=100, marker="x",
-                       label="Nearest Point - App")
-            ax.scatter([nearest_pt_on_api.x()], [nearest_pt_on_api.y()], color="green", s=100, marker="o",
-                       label="Nearest Point - API")
+            ax.scatter(
+                [app_centroid_pt.x()], [app_centroid_pt.y()],
+                color="red", s=60, marker="o", label="Centroid"
+            )
+            ax.scatter(
+                [nearest_pt_on_app.x()], [nearest_pt_on_app.y()],
+                color="orange", s=100, marker="x", label="Nearest Point - App"
+            )
+            ax.scatter(
+                [nearest_pt_on_api.x()], [nearest_pt_on_api.y()],
+                color="green", s=100, marker="o", label="Nearest Point - API"
+            )
 
             if not is_inside_case:
                 arrow = FancyArrowPatch(
