@@ -1,0 +1,28 @@
+[general]
+
+name=Ireland–Northern Ireland Cross-Border Analysis
+
+qgisMinimumVersion=4.0
+
+version=0.1.0
+
+author=Chao Gong
+email=[gongch2024@gmail.com](mailto:gongch2024@gmail.com)
+
+description=Cross-border nearest feature analysis for Ireland and Northern Ireland. Supports EPA Ireland, DAERA/NIEA Open Data, Environment Agency and Natural England datasets with automatic CRS selection, distance calculation, direction analysis and CSV export.
+
+about=Ireland–Northern Ireland Cross-Border Analysis is a QGIS plugin for nearest-feature analysis across the Republic of Ireland and Northern Ireland. Key features include support for EPA Ireland, DAERA/NIEA Open Data, Environment Agency and Natural England datasets; automatic CRS selection between Irish Grid, British National Grid and UTM zones; nearest feature distance and direction calculation; CSV export; and map export. The plugin is designed for environmental assessment, planning, ecology, renewable energy, infrastructure and cross-border spatial analysis projects.
+
+tracker=https://github.com/chao515737/nearest_analysis_plugin/issues
+repository=https://github.com/chao515737/nearest_analysis_plugin/tree/cross-border-development/ireland_ni_crossborder_analysis
+homepage=https://github.com/chao515737/nearest_analysis_plugin/tree/cross-border-development/ireland_ni_crossborder_analysis
+
+hasProcessingProvider=no
+
+tags=ireland,northern-ireland,cross-border,epa,daera,niea,environment-agency,natural-england,nearest-analysis,gis,distance,bearing,csv,planning,ecology
+
+category=Vector
+
+experimental=False
+deprecated=False
+server=False

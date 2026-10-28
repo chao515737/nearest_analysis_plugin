@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/plugins/Nearest_Analysis" >
+        <file>icon.png</file>
+    </qresource>
+</RCC>
