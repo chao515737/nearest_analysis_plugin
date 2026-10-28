@@ -20,7 +20,7 @@ bibliography: paper.bib
 
 # Summary
 
-Ireland–Northern Ireland Cross-Border Analysis is an open-source QGIS plugin for nearest-feature analysis involving geospatial datasets from the Republic of Ireland and Northern Ireland. The plugin combines local application-area geometries with remote vector datasets discovered through geospatial web services. It provides coordinate reference system (CRS) selection for metric analysis, geometric nearest-feature distances, directions referenced to true north, topological relationship labels, and CSV outputs. The current public development release is version 0.1.0.
+Ireland–Northern Ireland Cross-Border Analysis is an open-source QGIS plugin for nearest-feature analysis involving geospatial datasets from the Republic of Ireland and Northern Ireland. The plugin combines local application-area geometries with remote vector datasets discovered through geospatial web services. It provides coordinate reference system (CRS) selection for metric analysis, geometric nearest-feature distances, directions referenced to true north, topological relationship labels, and CSV outputs. The current public development release is version 1.4.0.
 
 # Statement of need
 
