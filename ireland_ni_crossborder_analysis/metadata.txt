@@ -4,7 +4,7 @@ name=Ireland–Northern Ireland Cross-Border Analysis
 
 qgisMinimumVersion=4.0
 
-version=0.1.0
+version=1.4.0
 
 author=Chao Gong
 email=[gongch2024@gmail.com](mailto:gongch2024@gmail.com)
