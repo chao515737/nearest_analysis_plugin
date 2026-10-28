@@ -64,4 +64,17 @@ OpenAI ChatGPT was used to assist with generating and revising Python code, debu
 
 The author acknowledges the open-source QGIS community and the public organisations providing the geospatial web services used by the plugin.
 
+## License
+
+This project is licensed under the MIT License.
+See [LICENSE](LICENSE) for details.
+
+## Data Sources
+
+The plugin accesses publicly available geospatial datasets
+from multiple providers in Ireland and the United Kingdom.
+
+Data remain subject to the licensing and attribution
+requirements of their respective providers.
+
 # References
