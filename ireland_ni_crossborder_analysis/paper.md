@@ -58,7 +58,7 @@ After installation, users can load their own application-area polygon dataset ne
 
 # AI usage disclosure
 
-OpenAI ChatGPT was used extensively to assist with generating and revising Python code, debugging, and drafting documentation and manuscript text. The author specified the application requirements and requested changes to the analysis workflow. Python syntax checks and selected interactive QGIS checks have been reported during development, but a comprehensive independent validation of the cross-border release has not yet been completed. The author remains responsible for checking the software, its licensing and research claims, and the accuracy of this manuscript. The specific AI model versions used and the extent of completed human code review must be verified and documented before submission.
+OpenAI ChatGPT was used to assist with generating and revising Python code, debugging, and drafting documentation and manuscript text. The author specified the application requirements and requested changes to the analysis workflow. Python syntax checks and selected interactive QGIS checks have been reported during development, but a comprehensive independent validation of the cross-border release has not yet been completed. The author remains responsible for checking the software, its licensing and research claims, and the accuracy of this manuscript. The specific AI model versions used and the extent of completed human code review must be verified and documented before submission.
 
 # Acknowledgements
 
