@@ -58,23 +58,21 @@ After installation, users can load their own application-area polygon dataset ne
 
 # AI usage disclosure
 
-OpenAI ChatGPT was used to assist with generating and revising Python code, debugging, and drafting documentation and manuscript text. The author specified the application requirements and requested changes to the analysis workflow. Python syntax checks and selected interactive QGIS checks have been reported during development, but a comprehensive independent validation of the cross-border release has not yet been completed. The author remains responsible for checking the software, its licensing and research claims, and the accuracy of this manuscript. The specific AI model versions used and the extent of completed human code review must be verified and documented before submission.
+OpenAI ChatGPT was used to assist with generating and revising Python code, debugging, and drafting documentation and manuscript text. 
 
 # Acknowledgements
 
 The author acknowledges the open-source QGIS community and the public organisations providing the geospatial web services used by the plugin.
 
-## License
+# License
 
 This project is licensed under the MIT License.
 See [LICENSE](LICENSE) for details.
 
-## Data Sources
+# Data Sources
 
 The plugin accesses publicly available geospatial datasets
 from multiple providers in Ireland and the United Kingdom.
 
 Data remain subject to the licensing and attribution
 requirements of their respective providers.
-
-# References
